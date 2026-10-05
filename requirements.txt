@@ -1,0 +1,8 @@
+# Python 3.12 (o PlantCV ainda não tem wheels de SciPy compatíveis com 3.14).
+# No Streamlit Community Cloud: Advanced settings -> Python version -> 3.12.
+plantcv==4.11.3
+streamlit==1.65.0
+opencv-python==4.11.0.86
+numpy==2.4.6
+pandas==3.0.6
+altair==5.5.0

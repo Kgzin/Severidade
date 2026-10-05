@@ -1,0 +1,15 @@
+# Ambiente virtual e cache do Python (recriados a partir do requirements.txt)
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Segredos do Streamlit (nunca versionar)
+.streamlit/secrets.toml
+
+# Sistema / editores
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/

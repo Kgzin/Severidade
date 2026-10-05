@@ -1,0 +1,6 @@
+[server]
+# Fotos de câmera/celular costumam ter 3–10 MB; folga para várias de uma vez.
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false
