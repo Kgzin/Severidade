@@ -62,6 +62,12 @@ padrão das escalas diagramáticas (folha branca com contorno preto, sintomas em
      cinza ou preto, mesmo com folhas encostando na borda): folha = pixels com cor diferente do fundo
      (Otsu na distância LAB), `fill` e `fill_holes` do PlantCV. Pega lesões que chegam à margem.
      Várias folhas na mesma imagem são analisadas separadamente.
+   - **Gabarito** (modelo mais comum do projeto: várias folhas/faixas sobre quadro branco com
+     grade, números e bordas impressas): cada folha é achada pelo excesso de verde
+     (ExG = 2g − r − b), que ignora papel, tinta vermelha/preta e brilho; a nervura central
+     esbranquiçada é incluída pelo canal `a`. Todas as folhas são analisadas, sem remoção de
+     pecíolo. Escolhido automaticamente quando há 3+ folhas de tamanho parecido e o fundo
+     uniforme "engoliria" a impressão do quadro.
    - **Complexo** (foto de campo: folha encostando na borda, vasos, solo, outras plantas):
      folha = pixels verdes (canal `a` baixo) + fechamento morfológico e `fill_holes` para
      incluir as manchas. Só a maior folha é analisada.

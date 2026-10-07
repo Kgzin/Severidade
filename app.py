@@ -182,15 +182,18 @@ with st.sidebar:
             pf.borda_px = st.slider("Margem da folha ignorada (px)", 0, 10, pf.borda_px,
                                     help="Pixels da borda misturam folha e fundo e podem parecer lesão.")
         with st.expander("Segmentação da folha"):
-            fundos = {"Automático": "auto", "Uniforme (escaneada / papel)": "uniforme",
-                      "Complexo (foto de campo)": "complexo"}
+            fundos = {"Automático": "auto", "Gabarito (várias folhas sobre quadro impresso)": "gabarito",
+                      "Uniforme (escaneada / papel)": "uniforme", "Complexo (foto de campo)": "complexo"}
             pf.modo_fundo = fundos[st.selectbox(
                 "Tipo de fundo", list(fundos),
-                help="Uniforme: folha separada pela diferença de cor para o fundo (pega lesões na "
-                     "margem). Complexo: folha encontrada pela cor verde, para fotos com vasos, solo, "
-                     "outras plantas ou folha encostando na borda. Automático decide pela borda da imagem.")]
+                help="Gabarito: várias folhas/faixas sobre quadro com grade, números ou bordas "
+                     "impressas; cada folha é achada pelo excesso de verde. Uniforme: folha separada "
+                     "pela diferença de cor para um fundo liso (pega lesões na margem). Complexo: foto "
+                     "de campo com vasos, solo ou outras plantas; analisa a maior folha. "
+                     "Automático escolhe sozinho.")]
             maior = st.selectbox("Folhas analisadas", ["Automático", "Só a maior", "Todas"],
-                                 help="Automático: todas no fundo uniforme; só a maior no complexo.")
+                                 help="Automático: todas no gabarito e no fundo uniforme; só a maior "
+                                      "no complexo.")
             pf.so_maior_folha = {"Automático": None, "Só a maior": True, "Todas": False}[maior]
             pf.remover_peciolo = st.checkbox("Remover pecíolo", pf.remover_peciolo,
                                              help="Exclui estruturas finas presas à folha (pecíolo, "
@@ -315,7 +318,7 @@ for nome, conteudo in entradas:
                       "Limiar 'a'": f.limiar_a}
             linhas.append(linha)
         st.caption(f"Fundo detectado: **{res.modo_fundo}** · limiar de verde ('a'): "
-                   + ", ".join(str(f.limiar_a) for f in res.folhas))
+                   + ", ".join(str(v) for v in sorted({f.limiar_a for f in res.folhas})))
         if len(linhas) > 1:
             st.dataframe(pd.DataFrame(linhas), hide_index=True, width="stretch")
         if res.lesoes:

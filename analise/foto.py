@@ -7,7 +7,10 @@ Pipeline:
    - complexo (foto de campo, folha encostando na borda, vasos/solo ao fundo): folha =
      pixels verdes (canal 'a' baixo) -> fechamento morfológico + fill_holes para incluir
      as manchas; só a maior folha é analisada.
-   O pecíolo é removido por abertura morfológica (estrutura fina).
+   - gabarito (várias folhas/faixas sobre quadro com grade, números ou bordas impressas):
+     folha = excesso de verde (ExG, Otsu) + nervura central esbranquiçada (canal 'a') ->
+     fill_holes; todas as folhas são analisadas.
+   O pecíolo é removido por abertura morfológica (estrutura fina), exceto no gabarito.
 2. Tecido sadio x sintoma pelo canal 'a' do LAB (eixo verde <-> vermelho, 128 = neutro).
    Todo sintoma deixa de ser verde: necrose bege/marrom, clorose amarela, pústulas
    alaranjadas, manchas pretas e oídio branco (cores neutras) ficam acima do limiar.
@@ -88,8 +91,84 @@ class ResultadoFoto:
     avisos: list[str] = field(default_factory=list)
 
 
+def _mascara_exg(img_bgr: np.ndarray, p: ParamsFoto) -> np.ndarray:
+    """Folhas pelo excesso de verde (ExG = 2g - r - b, cromaticidades normalizadas).
+
+    Índice clássico de fenotipagem: separa tecido verde de papel branco, tinta vermelha/preta
+    (grade e números de gabarito) e solo, independentemente do brilho. Lesões internas viram
+    buracos e são preenchidas (fill_holes); um fechamento curto reúne pequenas falhas da borda
+    sem unir folhas vizinhas.
+    """
+    H, W = img_bgr.shape[:2]
+    bgr = cv2.medianBlur(img_bgr, 5).astype(np.float32)
+    soma = bgr.sum(axis=2) + 1e-6
+    exg = (2 * bgr[..., 1] - bgr[..., 2] - bgr[..., 0]) / soma          # -1..2, verde > 0
+    exg_u8 = np.clip((exg + 0.2) / 0.8 * 255, 0, 255).astype(np.uint8)
+    if p.limiar_folha is None:
+        verde = pcv.threshold.otsu(exg_u8, object_type="light")
+    else:
+        verde = pcv.threshold.binary(exg_u8, p.limiar_folha, object_type="light")
+
+    # Nervura central esbranquiçada (cana, milho, sorgo) tem ExG baixo e dividiria a faixa em
+    # duas metades. Ela ainda é levemente verde no canal 'a' (≈115–119) e o papel não (≈126):
+    # entra o que estiver abaixo do meio-termo entre o 'a' da folha e o do fundo, desde que
+    # ligado a tecido verde.
+    canal_a = cv2.cvtColor(cv2.medianBlur(img_bgr, 5), cv2.COLOR_BGR2LAB)[..., 1]
+    if verde.any() and (~(verde > 0)).any():
+        corte = (np.median(canal_a[verde > 0]) + np.median(canal_a[verde == 0])) / 2
+        uniao = ((verde > 0) | (canal_a < corte)).astype(np.uint8)
+        n, rot = cv2.connectedComponents(uniao, connectivity=8)
+        ligados = np.zeros(n, bool)
+        ligados[np.unique(rot[verde > 0])] = True
+        ligados[0] = False
+        verde = ligados[rot].astype(np.uint8) * 255
+
+    k = max(3, int(0.006 * min(H, W)) | 1)
+    verde = cv2.morphologyEx(verde, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+    return pcv.fill_holes(pcv.fill(verde, size=p.area_min_ruido))
+
+
+def _varias_folhas(mask: np.ndarray, frac_min: float = 0.002) -> bool:
+    """Gabarito: 3 ou mais objetos verdes de tamanho parecido (>= 25% do maior)."""
+    n, _, st, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    areas = st[1:, cv2.CC_STAT_AREA]
+    areas = areas[areas >= frac_min * mask.size]
+    return len(areas) >= 3 and int((areas >= 0.25 * areas.max()).sum()) >= 3
+
+
+def _engoliu_fundo(mask: np.ndarray) -> bool:
+    """A máscara 'folha' do fundo uniforme pegou o gabarito impresso (grade, bordas, números)."""
+    n, rot, st, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if n < 2:
+        return False
+    r = 1 + int(np.argmax(st[1:, cv2.CC_STAT_AREA]))
+    maior = rot == r
+    bordas = sum(bool(x.any()) for x in (maior[0], maior[-1], maior[:, 0], maior[:, -1]))
+    return st[r, cv2.CC_STAT_AREA] > 0.4 * mask.size or bordas >= 3
+
+
 def segmentar_folha(img_bgr: np.ndarray, p: ParamsFoto) -> tuple[np.ndarray, str]:
-    """Retorna (máscara das folhas, modo de fundo usado: "uniforme" ou "complexo")."""
+    """Retorna (máscara das folhas, modo de fundo usado: "uniforme", "gabarito" ou "complexo")."""
+    modo = p.modo_fundo
+    if modo == "gabarito":
+        return _mascara_exg(img_bgr, p), modo
+    if modo == "auto":
+        exg = _mascara_exg(img_bgr, p)
+        if _varias_folhas(exg):
+            # Várias folhas lado a lado (gabarito, bancada): ainda tenta o fundo uniforme,
+            # que preserva lesões na margem, e só fica com ele se não pegou a impressão.
+            uni, modo_uni = _segmentar_fundo(img_bgr, replace(p, modo_fundo="auto"))
+            if modo_uni == "uniforme" and not _engoliu_fundo(uni):
+                return uni, "uniforme"
+            return exg, "gabarito"
+    mask, modo = _segmentar_fundo(img_bgr, p)
+    if p.modo_fundo == "auto" and modo == "uniforme" and _engoliu_fundo(mask):
+        return _mascara_exg(img_bgr, p), "gabarito"
+    return mask, modo
+
+
+def _segmentar_fundo(img_bgr: np.ndarray, p: ParamsFoto) -> tuple[np.ndarray, str]:
+    """Segmentação pela cor do fundo (uniforme) ou pelo canal 'a' (complexo, foto de campo)."""
     lab_u8 = cv2.cvtColor(cv2.medianBlur(img_bgr, 5), cv2.COLOR_BGR2LAB)
     lab = lab_u8.astype(np.float32)
     H, W = lab.shape[:2]
@@ -192,7 +271,9 @@ def analisar(img_bgr: np.ndarray, params: ParamsFoto | None = None) -> Resultado
 
     mascara, modo_fundo = segmentar_folha(img_bgr, p)
     n, rotulos, stats, _ = cv2.connectedComponentsWithStats(mascara, connectivity=8)
-    objs = [r for r in range(1, n) if stats[r, cv2.CC_STAT_AREA] >= p.frac_area_folha * H * W]
+    # No gabarito cada folha/faixa ocupa pouco da foto (~0,5–2%); só fiapos ficam de fora.
+    frac_min = min(p.frac_area_folha, 0.002) if modo_fundo == "gabarito" else p.frac_area_folha
+    objs = [r for r in range(1, n) if stats[r, cv2.CC_STAT_AREA] >= frac_min * H * W]
     so_maior = p.so_maior_folha if p.so_maior_folha is not None else modo_fundo == "complexo"
     if so_maior and objs:
         objs = [max(objs, key=lambda r: stats[r, cv2.CC_STAT_AREA])]
@@ -213,7 +294,7 @@ def analisar(img_bgr: np.ndarray, params: ParamsFoto | None = None) -> Resultado
     regioes = []
     for r in objs:
         folha = rotulos == r
-        if p.remover_peciolo:
+        if p.remover_peciolo and modo_fundo != "gabarito":  # faixas de gabarito não têm pecíolo
             folha = _sem_peciolo(folha, p.frac_peciolo)
         nucleo = cv2.erode(folha.astype(np.uint8), k_borda, iterations=p.borda_px,
                            borderType=cv2.BORDER_CONSTANT, borderValue=0) > 0
