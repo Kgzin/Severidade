@@ -4,13 +4,16 @@ Executar:  .venv\\Scripts\\streamlit run app.py
 """
 
 from dataclasses import asdict
+from io import BytesIO
 from pathlib import Path
 
 import altair as alt
 import cv2
 import numpy as np
 import pandas as pd
+import pillow_heif
 import streamlit as st
+from PIL import Image, ImageOps
 
 from analise import diagramatica, foto
 from analise.escala import ESCALAS, escala_de_texto
@@ -20,15 +23,37 @@ MODO_DIAG = "Escala diagramática / desenho P&B"
 MODO_FOTO = "Foto de folha (qualquer doença)"
 SEM_ESCALA = "Nenhuma (apenas % de severidade)"
 
+TIPOS = ["png", "jpg", "jpeg", "tif", "tiff", "bmp", "heic", "heif"]
+
 st.set_page_config(page_title="Severidade foliar · PlantCV", page_icon="🌿", layout="wide")
+pillow_heif.register_heif_opener()  # Pillow passa a abrir HEIC/HEIF (fotos de iPhone)
 
 
 # ---------------------------------------------------------------- utilidades
+@st.cache_data(show_spinner=False, max_entries=16)
 def decodificar(conteudo: bytes) -> np.ndarray:
+    """Bytes do arquivo -> imagem BGR (uint8).
+
+    OpenCV lê PNG/JPG/TIF/BMP (já aplicando a orientação EXIF). HEIC/HEIF, que o OpenCV
+    não lê, vai pelo Pillow + pillow-heif, com a orientação EXIF aplicada à parte.
+    """
     img = cv2.imdecode(np.frombuffer(conteudo, np.uint8), cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Formato de imagem não reconhecido.")
-    return img
+    if img is not None:
+        return img
+    try:
+        with Image.open(BytesIO(conteudo)) as pil:
+            rgb = np.asarray(ImageOps.exif_transpose(pil).convert("RGB"))
+    except Exception as e:
+        raise ValueError("Formato de imagem não reconhecido.") from e
+    return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def previa(conteudo: bytes, lado_max: int = 1600) -> np.ndarray:
+    """Original reduzido para exibir: navegadores não mostram HEIC e fotos grandes pesam."""
+    img = decodificar(conteudo)
+    escala = lado_max / max(img.shape[:2])
+    return cv2.resize(img, None, fx=escala, fy=escala, interpolation=cv2.INTER_AREA) if escala < 1 else img
 
 
 @st.cache_data(show_spinner=False, max_entries=16)  # limita a memória no servidor
@@ -190,8 +215,7 @@ st.title("🌿 Análise de severidade de doenças foliares")
 st.caption("Segmentação com PlantCV · sintomas destacados em preto e branco · "
            "% de área foliar lesionada e nota na escala diagramática")
 
-arquivos = st.file_uploader("Imagens (PNG, JPG, TIF)", type=["png", "jpg", "jpeg", "tif", "tiff", "bmp"],
-                            accept_multiple_files=True)
+arquivos = st.file_uploader("Imagens (PNG, JPG, TIF, HEIC)", type=TIPOS, accept_multiple_files=True)
 entradas: list[tuple[str, bytes]] = [(a.name, a.getvalue()) for a in arquivos or []]
 if modo == MODO_DIAG:
     exemplo = "escala_ferrugem_alaranjada.png"
@@ -220,12 +244,12 @@ for nome, conteudo in entradas:
 
     if modo == MODO_DIAG:
         col_a, col_b = st.columns(2)
-        col_a.image(conteudo, caption="Original", width="stretch")
+        col_a.image(previa(conteudo), channels="BGR", caption="Original", width="stretch")
         col_b.image(res.sobreposicao, channels="BGR", width="stretch",
                     caption="Verde: limbo · vermelho: lesão · azul: contorno/nervura")
     else:
         col_a, col_b, col_c = st.columns(3)
-        col_a.image(conteudo, caption="Original", width="stretch")
+        col_a.image(previa(conteudo), channels="BGR", caption="Original", width="stretch")
         col_b.image(res.preto_branco, width="stretch", caption="Preto e branco: sintomas em preto")
         col_c.image(res.sobreposicao, channels="BGR", width="stretch",
                     caption="Contorno laranja: folha · magenta: sintoma")

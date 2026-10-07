@@ -43,6 +43,9 @@ convidados em **Settings → Sharing**.
 
 ## Modos de análise
 
+Formatos aceitos: PNG, JPG/JPEG, TIF/TIFF, BMP e **HEIC/HEIF** (fotos de iPhone, lidas com
+`pillow-heif`, com a orientação EXIF aplicada — foto tirada na vertical aparece em pé).
+
 **Escala diagramática / desenho P&B** — figuras como a de `exemplos/escala_ferrugem_alaranjada.png`.
 1. Linhas do desenho (contorno e nervura) são separadas das lesões por geometria:
    abertura morfológica com elementos lineares longos.
