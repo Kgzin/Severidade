@@ -112,6 +112,20 @@ Conferidas na publicação original (resumo, texto ou figura). Referência compl
 | Cana | Ferrugem marrom (*Puccinia melanocephala*) — faixas | 0 · 0–1 · 1–3 · 3–5 · 5–8 · 8–11 · 11–15 · 15–25 · >25 | Bonadiman, dissertação UFES, 2021 |
 | Qualquer | Horsfall & Barratt — faixas, notas 0–11 | 0 · 0–3 · 3–6 · 6–12 · 12–25 · 25–50 · 50–75 · 75–88 · 88–94 · 94–97 · 97–100 · 100 | Horsfall & Barratt, Phytopathology 35:655, 1945 |
 
+### Gráficos
+
+No painel **Gráficos** de cada imagem (e no Resumo, quando há várias imagens):
+
+- **Posição na escala** — régua com as faixas de nota da escala escolhida (eixo log, como as
+  escalas diagramáticas) e cada folha como um ponto na faixa em que caiu; folhas sem sintoma
+  aparecem num marcador único com a contagem.
+- **Folhas por nota** — quantas folhas caíram em cada nota (distribuição do lote).
+- **Severidade por folha** — % de cada folha, colorida pela nota, com a média tracejada.
+
+Cores das notas: rampa de um só tom (azul), mais escura = nota maior no tema claro e mais
+clara = nota maior no tema escuro. Cada faixa traz o número da nota escrito e todo gráfico tem
+tooltip, porque uma rampa de um tom só distingue com segurança até ~8 notas.
+
 Escalas por valores: nota = valor de referência mais próximo em escala log. Escalas por
 faixas: nota = faixa que contém a severidade medida.
 
@@ -122,6 +136,7 @@ app.py                  interface Streamlit
 analise/escala.py       escalas de referência e classificação
 analise/diagramatica.py análise de desenhos/escalas P&B
 analise/foto.py         análise de fotos coloridas (qualquer folha/doença) e saída P&B
+analise/graficos.py     gráficos de interpretação nas faixas de nota (Altair)
 exemplos/               escala diagramática de exemplo
 requirements.txt        pacotes Python
 packages.txt            pacotes do sistema (deploy Linux)

@@ -15,7 +15,7 @@ import pillow_heif
 import streamlit as st
 from PIL import Image, ImageOps
 
-from analise import diagramatica, foto
+from analise import diagramatica, foto, graficos
 from analise.escala import ESCALAS, escala_de_texto
 
 EXEMPLOS = Path(__file__).parent / "exemplos"
@@ -64,6 +64,31 @@ def rodar_diagramatica(conteudo: bytes, params: dict):
 @st.cache_data(show_spinner=False, max_entries=16)  # limita a memória no servidor
 def rodar_foto(conteudo: bytes, params: dict):
     return foto.analisar(decodificar(conteudo), foto.ParamsFoto(**params))
+
+
+def tema_escuro() -> bool:
+    try:
+        return st.context.theme.type == "dark"
+    except Exception:  # versões antigas / execução sem navegador
+        return False
+
+
+def mostrar_graficos(linhas: pd.DataFrame, escala, chave: str) -> None:
+    """Gráficos de interpretação: posição na escala, folhas por nota e severidade por folha."""
+    escuro = tema_escuro()
+    df = linhas.rename(columns={"Nota atribuída": "Nota"})
+    if escala:
+        st.altair_chart(graficos.posicao_na_escala(df, escala, escuro), width="stretch",
+                        key=f"pos_{chave}")
+    else:
+        st.caption("Escolha uma escala na barra lateral para ver as faixas de nota nos gráficos.")
+    if len(df) > 1:
+        g1, g2 = st.columns(2) if escala else (st.container(), None)
+        g1.altair_chart(graficos.severidade_por_folha(df, escala, escuro), width="stretch",
+                        key=f"sev_{chave}")
+        if escala:
+            g2.altair_chart(graficos.folhas_por_nota(df, escala, escuro), width="stretch",
+                            key=f"nota_{chave}")
 
 
 def fmt(v: float, casas: int = 2) -> str:
@@ -321,6 +346,9 @@ for nome, conteudo in entradas:
                    + ", ".join(str(v) for v in sorted({f.limiar_a for f in res.folhas})))
         if len(linhas) > 1:
             st.dataframe(pd.DataFrame(linhas), hide_index=True, width="stretch")
+        if linhas:
+            with st.expander("Gráficos", expanded=True):
+                mostrar_graficos(pd.DataFrame(linhas), escala, chave=nome)
         if res.lesoes:
             with st.expander("Manchas numeradas (da maior para a menor)", expanded=True):
                 n1, n2 = st.columns([3, 2])
@@ -355,3 +383,8 @@ if resumo:
     df_resumo = pd.DataFrame(resumo)
     st.dataframe(df_resumo, hide_index=True, width="stretch")
     st.download_button("Baixar CSV", csv_br(df_resumo), "severidade.csv", "text/csv")
+    if modo == MODO_FOTO and df_resumo["Imagem"].nunique() > 1:
+        st.markdown("**Gráficos — todas as imagens**")
+        geral = df_resumo.assign(Folha=df_resumo["Imagem"].map(lambda s: Path(s).stem) + " · "
+                                 + df_resumo["Folha"].astype(str))
+        mostrar_graficos(geral, escala, chave="__resumo__")
