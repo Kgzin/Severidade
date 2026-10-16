@@ -62,6 +62,10 @@ padrão das escalas diagramáticas (folha branca com contorno preto, sintomas em
      cinza ou preto, mesmo com folhas encostando na borda): folha = pixels com cor diferente do fundo
      (Otsu na distância LAB), `fill` e `fill_holes` do PlantCV. Pega lesões que chegam à margem.
      Várias folhas na mesma imagem são analisadas separadamente.
+   - **Fundo removido (preto)** (padrão do projeto: o fundo é removido antes e trocado por
+     preto): folha = tudo que não é o preto do fundo; lesões escuras internas são preenchidas.
+     Todas as folhas são analisadas (área mínima de 0,2% da imagem, para não perder faixas
+     finas). Escolhido automaticamente quando a borda da imagem é quase toda preta.
    - **Gabarito** (modelo mais comum do projeto: várias folhas/faixas sobre quadro branco com
      grade, números e bordas impressas): cada folha é achada pelo excesso de verde
      (ExG = 2g − r − b), que ignora papel, tinta vermelha/preta e brilho; a nervura central
@@ -71,6 +75,14 @@ padrão das escalas diagramáticas (folha branca com contorno preto, sintomas em
    - **Complexo** (foto de campo: folha encostando na borda, vasos, solo, outras plantas):
      folha = pixels verdes (canal `a` baixo) + fechamento morfológico e `fill_holes` para
      incluir as manchas. Só a maior folha é analisada.
+   - **Contorno manual** (quando a seleção automática não fica boa): no painel
+     "✏️ Contorno manual das folhas" de cada imagem, clique em volta da folha ponto a ponto e
+     feche clicando perto do primeiro ponto ou em **Fechar folha**; repita para cada folha.
+     Com pelo menos uma folha contornada, aquela imagem é analisada só pelos contornos
+     manuais (cada contorno = uma folha, na ordem do desenho). Por padrão o contorno é
+     ajustado à borda real da folha (o fundo que ficou dentro dele — preto, papel, grade —
+     sai), então não precisa ser preciso. Botões para desfazer ponto, apagar a última folha
+     e limpar tudo.
 2. Sintoma: canal `a` do LAB (eixo verde ↔ vermelho; 128 = sem cor). Todo sintoma deixa de
    ser verde — necrose bege/marrom, clorose e halos amarelos, pústulas alaranjadas, manchas
    pretas, oídio branco. Limiar automático relativo ao verde sadio da imagem: percentil 10
@@ -83,7 +95,8 @@ padrão das escalas diagramáticas (folha branca com contorno preto, sintomas em
    que devolve à cor os contornos finos; (c) na faixa duvidosa de cor só conta o pixel mais
    escuro que a vizinhança (pústula/mancha), enquanto cor claramente não-verde (necrose bege,
    oídio) conta sempre. Áreas são sempre informadas em px da imagem original.
-4. Pecíolo removido por abertura morfológica (estrutura fina presa ao limbo).
+4. Pecíolo removido por abertura morfológica (estrutura fina presa ao limbo), exceto em
+   faixas (objetos alongados) e no gabarito.
 5. Severidade = área sintomática / área da folha; nº de lesões e área média.
 6. A escala é opcional ("Nenhuma" mostra só a %).
 7. Imagem com as manchas numeradas da maior (nº 1) para a menor, numeração única na imagem

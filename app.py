@@ -3,6 +3,7 @@
 Executar:  .venv\\Scripts\\streamlit run app.py
 """
 
+import hashlib
 from dataclasses import asdict
 from io import BytesIO
 from pathlib import Path
@@ -14,6 +15,7 @@ import pandas as pd
 import pillow_heif
 import streamlit as st
 from PIL import Image, ImageOps
+from streamlit_image_coordinates import streamlit_image_coordinates
 
 from analise import diagramatica, foto, graficos
 from analise.escala import ESCALAS, escala_de_texto
@@ -89,6 +91,101 @@ def mostrar_graficos(linhas: pd.DataFrame, escala, chave: str) -> None:
         if escala:
             g2.altair_chart(graficos.folhas_por_nota(df, escala, escuro), width="stretch",
                             key=f"nota_{chave}")
+
+
+LARGURA_EDITOR = 1100  # px da imagem exibida no editor de contorno
+
+
+def _desenhar_contornos(img: np.ndarray, estado: dict, esc: float) -> np.ndarray:
+    """Prévia do editor: folhas concluídas (laranja, numeradas) e contorno em andamento (magenta)."""
+    vis = cv2.resize(img, None, fx=esc, fy=esc, interpolation=cv2.INTER_AREA) if esc < 1 else img.copy()
+    camada = vis.copy()
+    for i, pol in enumerate(estado["pol"], start=1):
+        pts = np.round(np.asarray(pol) * esc).astype(np.int32)
+        cv2.fillPoly(camada, [pts], (0, 140, 255))
+        cv2.polylines(vis, [pts], True, (0, 140, 255), 2, cv2.LINE_AA)
+        cx, cy = pts.mean(axis=0).astype(int)
+        cv2.putText(vis, str(i), (cx - 8, cy + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 4, cv2.LINE_AA)
+        cv2.putText(vis, str(i), (cx - 8, cy + 8), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2, cv2.LINE_AA)
+    vis = cv2.addWeighted(camada, 0.25, vis, 0.75, 0)
+    if estado["atual"]:
+        pts = np.round(np.asarray(estado["atual"]) * esc).astype(np.int32)
+        if len(pts) > 1:
+            cv2.polylines(vis, [pts], False, (255, 0, 255), 2, cv2.LINE_AA)
+        for j, (x, y) in enumerate(pts):
+            cv2.circle(vis, (int(x), int(y)), 7 if j == 0 else 4, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(vis, (int(x), int(y)), 7 if j == 0 else 4, (255, 0, 255), 2, cv2.LINE_AA)
+    return vis
+
+
+def editor_contorno(conteudo: bytes) -> dict:
+    """Contorno manual por cliques. Devolve o estado {pol, atual, recortar} desta imagem."""
+    chave = hashlib.md5(conteudo).hexdigest()[:12]
+    todos = st.session_state.setdefault("contornos", {})
+    estado = todos.setdefault(chave, {"pol": [], "atual": [], "t": None, "recortar": True})
+
+    def fechar():
+        if len(estado["atual"]) >= 3:
+            estado["pol"].append(estado["atual"])
+        estado["atual"] = []
+
+    def desfazer():
+        if estado["atual"]:
+            estado["atual"].pop()
+        elif estado["pol"]:
+            estado["atual"] = estado["pol"].pop()  # reabre a última folha para corrigir
+
+    def apagar_ultima():
+        estado["atual"] = []
+        if estado["pol"]:
+            estado["pol"].pop()
+
+    def limpar():
+        estado.update(pol=[], atual=[])
+
+    rotulo = "✏️ Contorno manual das folhas"
+    if estado["pol"]:
+        rotulo += f" — {len(estado['pol'])} folha(s) contornada(s), substituindo a detecção automática"
+    with st.expander(rotulo, expanded=bool(estado["pol"] or estado["atual"])):
+        st.caption("Clique em volta de uma folha, ponto a ponto. Para concluir, clique perto do "
+                   "primeiro ponto (círculo maior) ou em **Fechar folha**. Repita para cada folha. "
+                   "Com pelo menos uma folha contornada, a análise desta imagem usa só os contornos "
+                   "manuais, na ordem em que foram feitos.")
+        img = decodificar(conteudo)
+        H, W = img.shape[:2]
+        esc = min(1.0, LARGURA_EDITOR / W)
+        vis = _desenhar_contornos(img, estado, esc)
+        clique = streamlit_image_coordinates(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB), width="content",
+                                             key=f"clique_{chave}", cursor="crosshair")
+        if clique and clique.get("unix_time") != estado["t"]:
+            estado["t"] = clique.get("unix_time")
+            # Coordenadas do clique estão na imagem exibida; converte para a imagem original.
+            fx, fy = W / clique["width"], H / clique["height"]
+            ponto = [clique["x"] * fx, clique["y"] * fy]
+            perto_inicio = (len(estado["atual"]) >= 3 and
+                            np.hypot(*(np.subtract(ponto, estado["atual"][0]) / fx)) < 12)
+            if perto_inicio:
+                fechar()
+            else:
+                estado["atual"].append(ponto)
+            st.rerun()
+        b1, b2, b3, b4 = st.columns(4)
+        b1.button("✔ Fechar folha", on_click=fechar, disabled=len(estado["atual"]) < 3,
+                  key=f"fechar_{chave}", width="stretch")
+        b2.button("↶ Desfazer ponto", on_click=desfazer,
+                  disabled=not (estado["atual"] or estado["pol"]), key=f"desf_{chave}", width="stretch")
+        b3.button("🗑 Apagar última folha", on_click=apagar_ultima, disabled=not estado["pol"],
+                  key=f"apag_{chave}", width="stretch")
+        b4.button("Limpar tudo", on_click=limpar, disabled=not (estado["pol"] or estado["atual"]),
+                  key=f"limp_{chave}", width="stretch")
+        estado["recortar"] = st.checkbox(
+            "Ajustar o contorno à borda real da folha", value=estado["recortar"], key=f"rec_{chave}",
+            help="Tira de dentro do contorno o fundo que ficou incluído (preto, papel, grade), "
+                 "para ele não ser contado como lesão. Desligue só se o ajuste cortar a folha.")
+        if estado["atual"]:
+            st.info(f"Contorno em andamento: {len(estado['atual'])} ponto(s). "
+                    "Feche a folha para ela entrar na análise.")
+    return estado
 
 
 def fmt(v: float, casas: int = 2) -> str:
@@ -207,18 +304,20 @@ with st.sidebar:
             pf.borda_px = st.slider("Margem da folha ignorada (px)", 0, 10, pf.borda_px,
                                     help="Pixels da borda misturam folha e fundo e podem parecer lesão.")
         with st.expander("Segmentação da folha"):
-            fundos = {"Automático": "auto", "Gabarito (várias folhas sobre quadro impresso)": "gabarito",
+            fundos = {"Automático": "auto", "Fundo removido (preto)": "preto",
+                      "Gabarito (várias folhas sobre quadro impresso)": "gabarito",
                       "Uniforme (escaneada / papel)": "uniforme", "Complexo (foto de campo)": "complexo"}
             pf.modo_fundo = fundos[st.selectbox(
                 "Tipo de fundo", list(fundos),
-                help="Gabarito: várias folhas/faixas sobre quadro com grade, números ou bordas "
+                help="Fundo removido (preto): padrão do projeto; folha = tudo que não é o preto. "
+                     "Gabarito: várias folhas/faixas sobre quadro com grade, números ou bordas "
                      "impressas; cada folha é achada pelo excesso de verde. Uniforme: folha separada "
                      "pela diferença de cor para um fundo liso (pega lesões na margem). Complexo: foto "
                      "de campo com vasos, solo ou outras plantas; analisa a maior folha. "
                      "Automático escolhe sozinho.")]
             maior = st.selectbox("Folhas analisadas", ["Automático", "Só a maior", "Todas"],
-                                 help="Automático: todas no gabarito e no fundo uniforme; só a maior "
-                                      "no complexo.")
+                                 help="Automático: todas no fundo preto, no gabarito e no fundo "
+                                      "uniforme; só a maior no complexo.")
             pf.so_maior_folha = {"Automático": None, "Só a maior": True, "Todas": False}[maior]
             pf.remover_peciolo = st.checkbox("Remover pecíolo", pf.remover_peciolo,
                                              help="Exclui estruturas finas presas à folha (pecíolo, "
@@ -260,9 +359,17 @@ resumo: list[dict] = []
 for nome, conteudo in entradas:
     st.divider()
     st.subheader(nome)
+    params_img = params
+    if modo == MODO_FOTO:
+        # Contorno manual (se houver) substitui a detecção automática só desta imagem.
+        estado = editor_contorno(conteudo)
+        if estado["pol"]:
+            params_img = dict(params, poligonos=tuple(tuple(map(tuple, p)) for p in estado["pol"]),
+                              recortar_manual=estado["recortar"])
     try:
         with st.spinner("Analisando…"):
-            res = rodar_diagramatica(conteudo, params) if modo == MODO_DIAG else rodar_foto(conteudo, params)
+            res = (rodar_diagramatica(conteudo, params_img) if modo == MODO_DIAG
+                   else rodar_foto(conteudo, params_img))
     except Exception as e:  # imagem corrompida ou parâmetros que não segmentam nada
         st.error(f"Falha ao analisar: {e}")
         continue

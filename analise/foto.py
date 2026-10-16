@@ -2,6 +2,8 @@
 
 Pipeline:
 1. Segmentação da(s) folha(s), com o tipo de fundo detectado pela moldura da imagem:
+   - preto (padrão do projeto: fundo removido e trocado por preto): folha = tudo acima do
+     preto do fundo -> abertura curta (halo da remoção) -> fill_holes; todas as folhas.
    - uniforme (escaneada, papel, cartolina): folha = pixels cuja cor difere da cor da
      moldura (Otsu na distância LAB) -> fill (ruído) -> fill_holes. Pega lesões na margem.
    - complexo (foto de campo, folha encostando na borda, vasos/solo ao fundo): folha =
@@ -10,7 +12,8 @@ Pipeline:
    - gabarito (várias folhas/faixas sobre quadro com grade, números ou bordas impressas):
      folha = excesso de verde (ExG, Otsu) + nervura central esbranquiçada (canal 'a') ->
      fill_holes; todas as folhas são analisadas.
-   O pecíolo é removido por abertura morfológica (estrutura fina), exceto no gabarito.
+   O pecíolo é removido por abertura morfológica (estrutura fina), exceto no gabarito e em
+   objetos alongados (faixas), onde a abertura cortaria faixas finas ou sobrepostas.
 2. Tecido sadio x sintoma pelo canal 'a' do LAB (eixo verde <-> vermelho, 128 = neutro).
    Todo sintoma deixa de ser verde: necrose bege/marrom, clorose amarela, pústulas
    alaranjadas, manchas pretas e oídio branco (cores neutras) ficam acima do limiar.
@@ -49,6 +52,9 @@ class ParamsFoto:
     refinar: bool = True              # recorta as manchas pela luminância (detalhe fino)
     contraste_escuro: float = 3.0     # quanto (L, 0-255) a mancha é mais escura que a vizinhança
     forte: int = 8                    # 'a' >= limiar + forte é sintoma mesmo sem ser escuro
+    # Contorno manual: polígonos ((x, y), ...) em px da imagem original; substituem a detecção.
+    poligonos: tuple = ()
+    recortar_manual: bool = True      # tira do polígono o fundo (preto/papel liso) que ficou dentro
 
 
 @dataclass
@@ -147,9 +153,34 @@ def _engoliu_fundo(mask: np.ndarray) -> bool:
     return st[r, cv2.CC_STAT_AREA] > 0.4 * mask.size or bordas >= 3
 
 
+def _fundo_preto(img_bgr: np.ndarray) -> bool:
+    """Fundo removido e trocado por preto (padrão do projeto): moldura quase toda preta."""
+    H, W = img_bgr.shape[:2]
+    b = max(2, min(H, W) // 50)
+    mx = img_bgr.max(axis=2)
+    moldura = np.concatenate([mx[:b].ravel(), mx[-b:].ravel(), mx[:, :b].ravel(), mx[:, -b:].ravel()])
+    return np.mean(moldura <= 20) >= 0.6 and np.mean(mx <= 20) >= 0.2
+
+
+def _mascara_preto(img_bgr: np.ndarray, p: ParamsFoto) -> np.ndarray:
+    """Folhas = tudo que não é o preto do fundo removido.
+
+    O fundo vale 0–10 (resíduo de compressão); o tecido, mesmo necrosado, fica bem acima.
+    Lesões escuras internas viram buracos e são preenchidas (fill_holes); uma abertura
+    curta tira o halo de 1–2 px que a remoção de fundo deixa em volta das folhas.
+    """
+    mx = cv2.medianBlur(img_bgr, 3).max(axis=2)
+    corte = p.limiar_folha if p.limiar_folha is not None else 20
+    mask = (mx > corte).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    return pcv.fill_holes(pcv.fill(mask, size=p.area_min_ruido))
+
+
 def segmentar_folha(img_bgr: np.ndarray, p: ParamsFoto) -> tuple[np.ndarray, str]:
-    """Retorna (máscara das folhas, modo de fundo usado: "uniforme", "gabarito" ou "complexo")."""
+    """Retorna (máscara das folhas, modo de fundo: "preto", "uniforme", "gabarito" ou "complexo")."""
     modo = p.modo_fundo
+    if modo == "preto" or (modo == "auto" and _fundo_preto(img_bgr)):
+        return _mascara_preto(img_bgr, p), "preto"
     if modo == "gabarito":
         return _mascara_exg(img_bgr, p), modo
     if modo == "auto":
@@ -216,6 +247,61 @@ def _segmentar_fundo(img_bgr: np.ndarray, p: ParamsFoto) -> tuple[np.ndarray, st
     return pcv.fill_holes(verde), modo
 
 
+def _nao_fundo(img_bgr: np.ndarray) -> np.ndarray | None:
+    """Pixels que não são o fundo, quando o fundo é reconhecível (preto removido ou papel liso).
+
+    Usado para ajustar o contorno manual à borda real da folha. Fundo preto ou papel liso:
+    pela cor do fundo (folga larga, pega lesões na margem). Gabarito impresso ou foto de
+    campo: pela detecção automática de folha daquele tipo de imagem (verde), dentro do polígono.
+    """
+    if _fundo_preto(img_bgr):
+        return _mascara_preto(img_bgr, ParamsFoto()) > 0
+    lab = cv2.cvtColor(cv2.medianBlur(img_bgr, 5), cv2.COLOR_BGR2LAB).astype(np.float32)
+    H, W = lab.shape[:2]
+    b = max(2, min(H, W) // 50)
+    moldura = np.concatenate([lab[:b].reshape(-1, 3), lab[-b:].reshape(-1, 3),
+                              lab[:, :b].reshape(-1, 3), lab[:, -b:].reshape(-1, 3)])
+    neutros = moldura[np.hypot(moldura[:, 1] - 128, moldura[:, 2] - 128) < 15]
+    if len(neutros) >= 0.6 * len(moldura):
+        fundo = np.median(neutros, axis=0)
+        if np.mean(np.linalg.norm(neutros - fundo, axis=1) < 20) >= 0.85:
+            return np.linalg.norm(lab - fundo, axis=2) > 25
+    return segmentar_folha(img_bgr, ParamsFoto())[0] > 0
+
+
+def _rotulos_manuais(img_bgr: np.ndarray, p: "ParamsFoto", f: float) -> tuple[np.ndarray, list[int]]:
+    """Imagem de rótulos a partir dos polígonos (coordenadas da imagem original)."""
+    H, W = img_bgr.shape[:2]
+    rotulos = np.zeros((H, W), np.int32)
+    nao_fundo = _nao_fundo(img_bgr) if p.recortar_manual else None
+    objs = []
+    for i, pol in enumerate(p.poligonos, start=1):
+        if len(pol) < 3:
+            continue
+        pts = np.round(np.asarray(pol, float) * f).astype(np.int32)
+        m = np.zeros((H, W), np.uint8)
+        cv2.fillPoly(m, [pts], 1)
+        if nao_fundo is not None:
+            ajustada = pcv.fill_holes(((m > 0) & nao_fundo).astype(np.uint8) * 255) > 0
+            # Se o recorte tirou quase tudo, o fundo não é o esperado: fica o polígono.
+            if ajustada.sum() >= 0.2 * m.sum():
+                m = ajustada.astype(np.uint8)
+        livre = (m > 0) & (rotulos == 0)   # contornos sobrepostos: o primeiro fica com a área
+        if livre.sum() >= 50:
+            rotulos[livre] = i
+            objs.append(i)
+    return rotulos, objs
+
+
+def _alongada(folha: np.ndarray, razao: float = 4.0) -> bool:
+    """Objeto em forma de faixa: comprimento >= razao × largura (retângulo mínimo)."""
+    pts = cv2.findNonZero(folha.astype(np.uint8))
+    if pts is None:
+        return False
+    (_, _), (w, h), _ = cv2.minAreaRect(pts)
+    return max(w, h) >= razao * max(1.0, min(w, h))
+
+
 def _sem_peciolo(folha: np.ndarray, frac: float) -> np.ndarray:
     """Abertura com disco maior que a largura do pecíolo; mantém o maior pedaço (o limbo).
 
@@ -269,17 +355,27 @@ def analisar(img_bgr: np.ndarray, params: ParamsFoto | None = None) -> Resultado
                 area_min_lesao=round(p0.area_min_lesao * f * f), borda_px=max(1, round(p0.borda_px * f)))
     H, W = img_bgr.shape[:2]
 
-    mascara, modo_fundo = segmentar_folha(img_bgr, p)
-    n, rotulos, stats, _ = cv2.connectedComponentsWithStats(mascara, connectivity=8)
-    # No gabarito cada folha/faixa ocupa pouco da foto (~0,5–2%); só fiapos ficam de fora.
-    frac_min = min(p.frac_area_folha, 0.002) if modo_fundo == "gabarito" else p.frac_area_folha
-    objs = [r for r in range(1, n) if stats[r, cv2.CC_STAT_AREA] >= frac_min * H * W]
-    so_maior = p.so_maior_folha if p.so_maior_folha is not None else modo_fundo == "complexo"
-    if so_maior and objs:
-        objs = [max(objs, key=lambda r: stats[r, cv2.CC_STAT_AREA])]
-    objs.sort(key=lambda r: (stats[r, cv2.CC_STAT_LEFT], stats[r, cv2.CC_STAT_TOP]))
+    if p.poligonos:
+        # Contorno manual: cada polígono desenhado pelo usuário é uma folha, na ordem do desenho.
+        rotulos, objs = _rotulos_manuais(img_bgr, p, f)
+        modo_fundo = "manual"
+        if len(objs) < len(p.poligonos):
+            avisos.append("Algum contorno manual ficou vazio (menos de 3 pontos ou fora da imagem).")
+    else:
+        mascara, modo_fundo = segmentar_folha(img_bgr, p)
+        n, rotulos, stats, _ = cv2.connectedComponentsWithStats(mascara, connectivity=8)
+        # No gabarito e no fundo preto (lotes de faixas) cada folha ocupa pouco da foto (~0,5–2%);
+        # só fiapos ficam de fora.
+        frac_min = (min(p.frac_area_folha, 0.002) if modo_fundo in ("gabarito", "preto")
+                    else p.frac_area_folha)
+        objs = [r for r in range(1, n) if stats[r, cv2.CC_STAT_AREA] >= frac_min * H * W]
+        so_maior = p.so_maior_folha if p.so_maior_folha is not None else modo_fundo == "complexo"
+        if so_maior and objs:
+            objs = [max(objs, key=lambda r: stats[r, cv2.CC_STAT_AREA])]
+        objs.sort(key=lambda r: (stats[r, cv2.CC_STAT_LEFT], stats[r, cv2.CC_STAT_TOP]))
     if not objs:
-        avisos.append("Nenhuma folha segmentada — ajuste o limiar de segmentação.")
+        avisos.append("Nenhuma folha segmentada — ajuste o limiar de segmentação "
+                      "ou contorne as folhas manualmente.")
 
     lab = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
     lum = lab[..., 0]
@@ -294,7 +390,10 @@ def analisar(img_bgr: np.ndarray, params: ParamsFoto | None = None) -> Resultado
     regioes = []
     for r in objs:
         folha = rotulos == r
-        if p.remover_peciolo and modo_fundo != "gabarito":  # faixas de gabarito não têm pecíolo
+        # Faixas (cana, milho, gramíneas) não têm pecíolo: a abertura cortaria faixas finas ou
+        # sobrepostas. Só folhas inteiras, não alongadas, passam pela remoção.
+        if (p.remover_peciolo and modo_fundo not in ("gabarito", "manual")
+                and not _alongada(folha)):
             folha = _sem_peciolo(folha, p.frac_peciolo)
         nucleo = cv2.erode(folha.astype(np.uint8), k_borda, iterations=p.borda_px,
                            borderType=cv2.BORDER_CONSTANT, borderValue=0) > 0
