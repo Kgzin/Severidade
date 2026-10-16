@@ -75,14 +75,22 @@ padrão das escalas diagramáticas (folha branca com contorno preto, sintomas em
    - **Complexo** (foto de campo: folha encostando na borda, vasos, solo, outras plantas):
      folha = pixels verdes (canal `a` baixo) + fechamento morfológico e `fill_holes` para
      incluir as manchas. Só a maior folha é analisada.
-   - **Contorno manual** (quando a seleção automática não fica boa): no painel
-     "✏️ Contorno manual das folhas" de cada imagem, clique em volta da folha ponto a ponto e
-     feche clicando perto do primeiro ponto ou em **Fechar folha**; repita para cada folha.
-     Com pelo menos uma folha contornada, aquela imagem é analisada só pelos contornos
-     manuais (cada contorno = uma folha, na ordem do desenho). Por padrão o contorno é
-     ajustado à borda real da folha (o fundo que ficou dentro dele — preto, papel, grade —
-     sai), então não precisa ser preciso. Botões para desfazer ponto, apagar a última folha
-     e limpar tudo.
+   - **Editar a seleção** (quando a detecção automática não fica boa): no painel
+     "✏️ Editar a seleção das folhas" de cada imagem, **Editar a seleção automática** carrega
+     os contornos detectados como pontos (alças) editáveis — tolerância de 1,5 px, então sem
+     mexer em nada o resultado é o mesmo da detecção automática. Ferramentas:
+     - **Mover pontos**: arraste um ponto até a nova posição (o contorno é redesenhado ao
+       soltar o mouse); clique na borda, fora de um ponto, para criar um ponto novo ali;
+     - **Remover ponto**: clique no ponto;
+     - **Nova folha**: clique em volta da folha, ponto a ponto, e feche clicando perto do
+       primeiro ponto (ou **Fechar folha**);
+     - **Excluir folha**: clique dentro dela.
+     Também há **Desfazer**, **Restaurar a automática** e **Descartar edição** (volta à
+     detecção automática). Com a seleção editada, a imagem é analisada pelos contornos
+     editados, com o mesmo limiar de sintoma da detecção automática (editar uma folha não muda
+     a avaliação das outras). O preto do fundo removido nunca conta como folha. **Desenhar do
+     zero** começa sem contornos, com ajuste automático à borda real da folha.
+     Arrastar exige mouse (não funciona em tela de toque).
 2. Sintoma: canal `a` do LAB (eixo verde ↔ vermelho; 128 = sem cor). Todo sintoma deixa de
    ser verde — necrose bege/marrom, clorose e halos amarelos, pústulas alaranjadas, manchas
    pretas, oídio branco. Limiar automático relativo ao verde sadio da imagem: percentil 10

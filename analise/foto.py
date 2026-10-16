@@ -274,6 +274,9 @@ def _rotulos_manuais(img_bgr: np.ndarray, p: "ParamsFoto", f: float) -> tuple[np
     H, W = img_bgr.shape[:2]
     rotulos = np.zeros((H, W), np.int32)
     nao_fundo = _nao_fundo(img_bgr) if p.recortar_manual else None
+    # O preto do fundo removido nunca é tecido: sai sempre, mesmo sem o ajuste de borda (um
+    # ponto arrastado para fora ou um contorno que se cruza não vira "lesão").
+    nao_preto = _mascara_preto(img_bgr, ParamsFoto()) > 0 if _fundo_preto(img_bgr) else None
     objs = []
     for i, pol in enumerate(p.poligonos, start=1):
         if len(pol) < 3:
@@ -286,6 +289,8 @@ def _rotulos_manuais(img_bgr: np.ndarray, p: "ParamsFoto", f: float) -> tuple[np
             # Se o recorte tirou quase tudo, o fundo não é o esperado: fica o polígono.
             if ajustada.sum() >= 0.2 * m.sum():
                 m = ajustada.astype(np.uint8)
+        elif nao_preto is not None:
+            m = ((m > 0) & nao_preto).astype(np.uint8)
         livre = (m > 0) & (rotulos == 0)   # contornos sobrepostos: o primeiro fica com a área
         if livre.sum() >= 50:
             rotulos[livre] = i
