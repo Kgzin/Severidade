@@ -81,7 +81,7 @@ padrão das escalas diagramáticas (folha branca com contorno preto, sintomas em
      folha = pixels verdes (canal `a` baixo) + fechamento morfológico e `fill_holes` para
      incluir as manchas. Só a maior folha é analisada.
    - **Editar a seleção** (quando a detecção automática não fica boa): no painel
-     "✏️ Editar a seleção das folhas" de cada imagem, **Editar a seleção automática** carrega
+     "✏️ Editar folhas e manchas" de cada imagem, **Editar a seleção automática** carrega
      os contornos detectados como pontos (alças) editáveis — tolerância de 1,5 px, então sem
      mexer em nada o resultado é o mesmo da detecção automática. Ferramentas:
      - **Mover pontos**: arraste um ponto até a nova posição (o contorno é redesenhado ao
@@ -90,6 +90,18 @@ padrão das escalas diagramáticas (folha branca com contorno preto, sintomas em
      - **Nova folha**: clique em volta da folha, ponto a ponto, e feche clicando perto do
        primeiro ponto (ou **Fechar folha**);
      - **Excluir folha**: clique dentro dela.
+     - **Marcar mancha**: contorne uma mancha que a análise não detectou (ex.: pontuações
+       esbranquiçadas sutis, que a cor não separa de nervuras e reflexos); a área contornada
+       inteira conta como lesão, então siga a borda da mancha de perto;
+     - **Apagar sintoma**: contorne uma área marcada como sintoma por engano (reflexo, sujeira,
+       rasgo) para ela deixar de contar.
+     **Zoom** de 1× a 16× (botões Aproximar / Afastar / Vista inteira) para contornar manchas
+     pequenas; ampliada, a imagem mostra os pixels nítidos. Com a ferramenta **Navegar**,
+     arraste para mover a vista ou clique para centralizar (na vista inteira, o clique já
+     aproxima 4× ali). Um minimapa mostra a área exibida. Todas as ferramentas funcionam no zoom.
+     Nas ferramentas de mancha, a prévia mostra em vermelho o que a análise está contando como
+     sintoma naquele momento. O botão **Marcar / apagar manchas** abre o editor direto nelas,
+     sem mexer no contorno das folhas.
      Também há **Desfazer**, **Restaurar a automática** e **Descartar edição** (volta à
      detecção automática). Com a seleção editada, a imagem é analisada pelos contornos
      editados, com o mesmo limiar de sintoma da detecção automática (editar uma folha não muda

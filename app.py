@@ -111,7 +111,10 @@ def mostrar_graficos(linhas: pd.DataFrame, escala, chave: str) -> None:
 
 LARGURA_EDITOR = 1100  # px da imagem exibida no editor de contorno
 RAIO_ALCA = 10         # px (na imagem exibida) para "pegar" um ponto
-MODOS_EDICAO = ["Mover pontos", "Remover ponto", "Nova folha", "Excluir folha"]
+MODOS_EDICAO = ["Navegar", "Mover pontos", "Remover ponto", "Nova folha", "Excluir folha",
+                "Marcar mancha", "Apagar sintoma"]
+MODOS_DESENHO = {"Nova folha": "pol", "Marcar mancha": "add", "Apagar sintoma": "rem"}
+_COR_DESENHO = {"pol": (255, 0, 255), "add": (0, 0, 255), "rem": (255, 200, 0)}  # BGR
 # Cores das folhas no editor (BGR): ciclo só para separar folhas vizinhas; o número identifica.
 _CORES_EDITOR = [(0, 140, 255), (255, 160, 0), (60, 200, 60), (200, 80, 230), (0, 220, 255), (255, 90, 90)]
 
@@ -137,37 +140,94 @@ def poligonos_da_mascara(mascara: np.ndarray, largura_original: int) -> list[lis
     return pols
 
 
-def _desenhar_contornos(img: np.ndarray, estado: dict, esc: float, alcas: bool) -> np.ndarray:
-    """Prévia do editor: folhas numeradas com seus pontos e o contorno em andamento (magenta)."""
-    vis = cv2.resize(img, None, fx=esc, fy=esc, interpolation=cv2.INTER_AREA) if esc < 1 else img.copy()
+ALTURA_EDITOR = 760    # altura máxima (px) da vista do editor: fotos em pé não ficam enormes
+ZOOMS = [1, 2, 4, 8, 16]
+
+
+def vista_editor(estado: dict, W: int, H: int) -> tuple[int, int, int, int, float]:
+    """Janela da imagem original mostrada no editor: (x0, y0, largura, altura, escala).
+
+    Zoom 1 = imagem inteira cabendo em LARGURA_EDITOR × ALTURA_EDITOR; zoom z mostra 1/z dela,
+    centrada em estado["centro"] (ajustado para não sair da imagem), ampliada z vezes.
+    """
+    base = min(LARGURA_EDITOR / W, ALTURA_EDITOR / H)
+    z = estado.get("zoom", 1)
+    ww, wh = max(8, round(W / z)), max(8, round(H / z))
+    cx, cy = estado.get("centro") or (W / 2, H / 2)
+    x0 = int(np.clip(round(cx - ww / 2), 0, W - ww))
+    y0 = int(np.clip(round(cy - wh / 2), 0, H - wh))
+    # O ponto escolhido fica guardado como está (aproximar perto da borda não o desloca);
+    # só a janela é ajustada para caber na imagem.
+    return x0, y0, ww, wh, base * z
+
+
+def _desenhar_contornos(img: np.ndarray, estado: dict, vista: tuple, alcas: bool,
+                        sintoma: np.ndarray | None = None, alvo: str = "pol") -> np.ndarray:
+    """Prévia do editor na janela `vista`: folhas numeradas com seus pontos, sintomas
+    detectados (opcional), manchas marcadas (vermelho), áreas apagadas (azul-claro) e o
+    desenho em andamento. Linhas e pontos têm espessura fixa na tela, qualquer que seja o zoom."""
+    x0, y0, ww, wh, s = vista
+    recorte = img[y0:y0 + wh, x0:x0 + ww]
+    tam = (max(1, round(ww * s)), max(1, round(wh * s)))
+    # Ampliado: pixels nítidos (vizinho mais próximo) para ver a borda real das manchas.
+    vis = cv2.resize(recorte, tam, interpolation=cv2.INTER_NEAREST if s >= 2 else cv2.INTER_AREA)
+    T = lambda pol: np.round((np.asarray(pol, float) - [x0, y0]) * s).astype(np.int32)
+
+    if sintoma is not None:  # sintomas detectados pela análise atual, em vermelho translúcido
+        H, W = img.shape[:2]
+        fy, fx = sintoma.shape[0] / H, sintoma.shape[1] / W
+        sub = sintoma[int(y0 * fy):int(np.ceil((y0 + wh) * fy)), int(x0 * fx):int(np.ceil((x0 + ww) * fx))]
+        if sub.size:
+            m = cv2.resize(sub, tam, interpolation=cv2.INTER_NEAREST) > 0
+            vis[m] = (vis[m] * 0.35 + np.array([40, 40, 255]) * 0.65).astype(np.uint8)
     camada = vis.copy()
     for i, pol in enumerate(estado["pol"]):
-        pts = np.round(np.asarray(pol) * esc).astype(np.int32)
-        cv2.fillPoly(camada, [pts], _CORES_EDITOR[i % len(_CORES_EDITOR)])
+        cv2.fillPoly(camada, [T(pol)], _CORES_EDITOR[i % len(_CORES_EDITOR)])
+    for lista in ("add", "rem"):
+        for pol in estado.get(lista, []):
+            cv2.fillPoly(camada, [T(pol)], _COR_DESENHO[lista])
     vis = cv2.addWeighted(camada, 0.22, vis, 0.78, 0)
+    for lista in ("add", "rem"):
+        for pol in estado.get(lista, []):
+            cv2.polylines(vis, [T(pol)], True, _COR_DESENHO[lista], 2, cv2.LINE_AA)
     for i, pol in enumerate(estado["pol"]):
         cor = _CORES_EDITOR[i % len(_CORES_EDITOR)]
-        pts = np.round(np.asarray(pol) * esc).astype(np.int32)
+        pts = T(pol)
         cv2.polylines(vis, [pts], True, cor, 2, cv2.LINE_AA)
         if alcas:
             for x, y in pts:
-                cv2.circle(vis, (int(x), int(y)), 4, (255, 255, 255), -1, cv2.LINE_AA)
-                cv2.circle(vis, (int(x), int(y)), 4, cor, 1, cv2.LINE_AA)
-        x0, y0 = pts[np.argmin(pts[:, 1])]
-        rot = str(i + 1)
-        (tw, th), _ = cv2.getTextSize(rot, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
-        x0 = int(np.clip(x0 - tw // 2, 0, vis.shape[1] - tw - 4))
-        y0 = int(max(th + 4, y0 - 6))
-        cv2.rectangle(vis, (x0 - 2, y0 - th - 3), (x0 + tw + 2, y0 + 3), (255, 255, 255), -1)
-        cv2.putText(vis, rot, (x0, y0), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2, cv2.LINE_AA)
+                if 0 <= x < tam[0] and 0 <= y < tam[1]:
+                    cv2.circle(vis, (int(x), int(y)), 4, (255, 255, 255), -1, cv2.LINE_AA)
+                    cv2.circle(vis, (int(x), int(y)), 4, cor, 1, cv2.LINE_AA)
+        # número da folha no ponto mais alto visível do contorno
+        dentro = pts[(pts[:, 0] >= 0) & (pts[:, 0] < tam[0]) & (pts[:, 1] >= 0) & (pts[:, 1] < tam[1])]
+        if len(dentro):
+            xr, yr = dentro[np.argmin(dentro[:, 1])]
+            rot = str(i + 1)
+            (tw, th), _ = cv2.getTextSize(rot, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+            xr = int(np.clip(xr - tw // 2, 0, max(0, tam[0] - tw - 4)))
+            yr = int(max(th + 4, yr - 6))
+            cv2.rectangle(vis, (xr - 2, yr - th - 3), (xr + tw + 2, yr + 3), (255, 255, 255), -1)
+            cv2.putText(vis, rot, (xr, yr), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2, cv2.LINE_AA)
     if estado["atual"]:
-        pts = np.round(np.asarray(estado["atual"]) * esc).astype(np.int32)
+        cor = _COR_DESENHO[alvo]
+        pts = T(estado["atual"])
         if len(pts) > 1:
-            cv2.polylines(vis, [pts], False, (255, 0, 255), 2, cv2.LINE_AA)
+            cv2.polylines(vis, [pts], False, cor, 2, cv2.LINE_AA)
         for j, (x, y) in enumerate(pts):
             cv2.circle(vis, (int(x), int(y)), 7 if j == 0 else 4, (255, 255, 255), -1, cv2.LINE_AA)
-            cv2.circle(vis, (int(x), int(y)), 7 if j == 0 else 4, (255, 0, 255), 2, cv2.LINE_AA)
+            cv2.circle(vis, (int(x), int(y)), 7 if j == 0 else 4, cor, 2, cv2.LINE_AA)
     return vis
+
+
+def _minimapa(img: np.ndarray, vista: tuple, largura: int = 220) -> np.ndarray:
+    """Imagem inteira pequena com o retângulo da área mostrada no editor."""
+    x0, y0, ww, wh, _ = vista
+    k = largura / img.shape[1]
+    mini = cv2.resize(img, None, fx=k, fy=k, interpolation=cv2.INTER_AREA)
+    cv2.rectangle(mini, (int(x0 * k), int(y0 * k)), (int((x0 + ww) * k) - 1, int((y0 + wh) * k) - 1),
+                  (0, 220, 255), 2)
+    return mini
 
 
 def _ponto_mais_proximo(pols: list, p: np.ndarray, raio: float) -> tuple[int, int] | None:
@@ -195,16 +255,39 @@ def _aresta_mais_proxima(pols: list, p: np.ndarray, raio: float) -> tuple[int, i
     return melhor
 
 
+def params_da_imagem(params: dict, estado: dict, conteudo: bytes) -> dict:
+    """Parâmetros da análise desta imagem, com as edições do avaliador (folhas e manchas)."""
+    extra = {}
+    if estado["pol"]:
+        # O limiar de sintoma sai do verde de todas as folhas; na edição ele fica o da
+        # detecção automática, para que mexer numa folha não mude a avaliação das outras.
+        limiar = params["limiar_a"]
+        if limiar is None:
+            auto = rodar_foto(conteudo, params)
+            limiar = auto.folhas[0].limiar_a if auto.folhas else None
+        extra |= dict(poligonos=tuple(tuple(map(tuple, p)) for p in estado["pol"]),
+                      recortar_manual=estado["recortar"], limiar_a=limiar)
+    if estado["add"]:
+        extra["lesoes_add"] = tuple(tuple(map(tuple, p)) for p in estado["add"])
+    if estado["rem"]:
+        extra["lesoes_rem"] = tuple(tuple(map(tuple, p)) for p in estado["rem"])
+    return dict(params, **extra) if extra else params
+
+
 def editor_contorno(conteudo: bytes, params: dict) -> dict:
-    """Edição da seleção: parte dos contornos automáticos e permite arrastar, incluir e remover
-    pontos, criar e excluir folhas. Devolve o estado {pol, atual, recortar} desta imagem."""
+    """Edição da seleção de folhas (arrastar/incluir/remover pontos, criar/excluir folhas) e
+    das manchas (marcar à mão as que a análise não pegou, apagar sintomas falsos).
+    Devolve o estado {pol, add, rem, atual, recortar} desta imagem."""
     chave = hashlib.md5(conteudo).hexdigest()[:12]
     todos = st.session_state.setdefault("contornos", {})
     estado = todos.setdefault(chave, {"pol": [], "atual": [], "t": None, "recortar": False,
                                       "hist": []})
+    estado.setdefault("add", [])
+    estado.setdefault("rem", [])
+    chave_modo = f"modo_{chave}"
 
     def guardar():  # histórico para "Desfazer"
-        estado["hist"].append((copy.deepcopy(estado["pol"]), list(estado["atual"])))
+        estado["hist"].append(copy.deepcopy({k: estado[k] for k in ("pol", "atual", "add", "rem")}))
         del estado["hist"][:-50]
 
     def carregar_automatica():
@@ -214,64 +297,110 @@ def editor_contorno(conteudo: bytes, params: dict) -> dict:
         estado["atual"] = []
         estado["recortar"] = False  # o usuário define a borda; o ajuste desfaria a correção
 
-    def comecar_do_zero():
-        guardar()
-        estado.update(pol=[], atual=[], recortar=True)
-        st.session_state[f"modo_{chave}"] = "Nova folha"
+    def comecar(modo_inicial: str, do_zero: bool = False):
+        if do_zero:
+            guardar()
+            estado.update(pol=[], atual=[], recortar=True)
+        st.session_state[chave_modo] = modo_inicial
         estado["editando"] = True
 
-    def fechar():
+    def fechar(modo_atual: str):
         if len(estado["atual"]) >= 3:
             guardar()
-            estado["pol"].append(estado["atual"])
+            estado[MODOS_DESENHO[modo_atual]].append(estado["atual"])
         estado["atual"] = []
 
     def desfazer():
         if estado["hist"]:
-            estado["pol"], estado["atual"] = estado["hist"].pop()
+            estado.update(estado["hist"].pop())
 
     def descartar():
-        estado.update(pol=[], atual=[], hist=[], editando=False)
+        estado.update(pol=[], atual=[], add=[], rem=[], hist=[], editando=False)
 
-    editando = bool(estado["pol"] or estado["atual"] or estado.get("editando"))
-    rotulo = "✏️ Editar a seleção das folhas"
+    editando = bool(estado["pol"] or estado["atual"] or estado["add"] or estado["rem"]
+                    or estado.get("editando"))
+    partes = []
     if estado["pol"]:
-        rotulo += f" — {len(estado['pol'])} folha(s) editada(s), substituindo a detecção automática"
+        partes.append(f"{len(estado['pol'])} folha(s) editada(s)")
+    if estado["add"]:
+        partes.append(f"{len(estado['add'])} mancha(s) marcada(s)")
+    if estado["rem"]:
+        partes.append(f"{len(estado['rem'])} área(s) de sintoma apagada(s)")
+    rotulo = "✏️ Editar folhas e manchas" + (" — " + ", ".join(partes) if partes else "")
     with st.expander(rotulo, expanded=editando):
         if not editando:
-            st.caption("Se a detecção automática errou o contorno de alguma folha, carregue a "
-                       "seleção dela como pontos editáveis e arraste os pontos para o lugar certo.")
-            c1, c2 = st.columns(2)
+            st.caption("Corrija o que a análise automática errou: o contorno das folhas (arrastando "
+                       "os pontos da seleção automática) ou as manchas (marcando as que não foram "
+                       "detectadas e apagando sintomas falsos).")
+            c1, c2, c3 = st.columns(3)
             if c1.button("✏️ Editar a seleção automática", key=f"carregar_{chave}", type="primary",
                          width="stretch"):
                 carregar_automatica()
-                estado["editando"] = True
+                comecar("Mover pontos")
                 st.rerun()
-            c2.button("Desenhar do zero", key=f"zero_{chave}", on_click=comecar_do_zero, width="stretch")
+            c2.button("🔴 Marcar / apagar manchas", key=f"manchas_{chave}", width="stretch",
+                      on_click=comecar, args=("Marcar mancha",))
+            c3.button("Desenhar folhas do zero", key=f"zero_{chave}", width="stretch",
+                      on_click=comecar, args=("Nova folha", True))
             return estado
 
-        modo = st.radio("Ferramenta", MODOS_EDICAO, horizontal=True, key=f"modo_{chave}",
-                        help="Mover pontos: arraste um ponto até a nova posição; clique na borda, "
+        modo = st.radio("Ferramenta", MODOS_EDICAO, horizontal=True, key=chave_modo,
+                        help="Navegar: arraste para mover a vista ou clique para centralizar nesse "
+                             "ponto; na vista inteira, o clique já aproxima 4× ali. Mover pontos: arraste um ponto até a nova posição; clique na borda, "
                              "fora de um ponto, para criar um ponto novo ali. Remover ponto: clique "
                              "no ponto. Nova folha: clique em volta dela, ponto a ponto, e feche "
-                             "clicando perto do primeiro ponto. Excluir folha: clique dentro dela.")
+                             "clicando perto do primeiro ponto. Excluir folha: clique dentro dela. "
+                             "Marcar mancha: contorne a mancha que a análise não pegou. Apagar "
+                             "sintoma: contorne uma área marcada como sintoma por engano.")
         img = decodificar(conteudo)
         H, W = img.shape[:2]
-        esc = min(1.0, LARGURA_EDITOR / W)
-        vis = _desenhar_contornos(img, estado, esc, alcas=modo in ("Mover pontos", "Remover ponto"))
-        ev = streamlit_image_coordinates(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB), width="content",
-                                         key=f"clique_{chave}", click_and_drag=True,
-                                         cursor="crosshair")
+
+        def mudar_zoom(passo: int | None):
+            i = ZOOMS.index(estado.get("zoom", 1))
+            estado["zoom"] = 1 if passo is None else ZOOMS[int(np.clip(i + passo, 0, len(ZOOMS) - 1))]
+
+        z1, z2, z3, z4 = st.columns([1, 1, 1, 3])
+        z1.button("＋ Aproximar", key=f"zmais_{chave}", on_click=mudar_zoom, args=(1,),
+                  disabled=estado.get("zoom", 1) == ZOOMS[-1], width="stretch")
+        z2.button("－ Afastar", key=f"zmenos_{chave}", on_click=mudar_zoom, args=(-1,),
+                  disabled=estado.get("zoom", 1) == 1, width="stretch")
+        z3.button("Vista inteira", key=f"zinteira_{chave}", on_click=mudar_zoom, args=(None,),
+                  disabled=estado.get("zoom", 1) == 1, width="stretch")
+        z4.caption(f"Zoom **{estado.get('zoom', 1)}×** — com **Navegar**: clique para aproximar ou "
+                   "centralizar, arraste para mover a vista.")
+        vista = vista_editor(estado, W, H)
+        sintoma = None
+        if modo in ("Marcar mancha", "Apagar sintoma"):
+            sintoma = rodar_foto(conteudo, params_da_imagem(params, estado, conteudo)).mascara_lesao
+            st.caption("Em vermelho: o que a análise está contando como sintoma agora. "
+                       "Contorno vermelho: manchas marcadas à mão · azul-claro: áreas apagadas.")
+        vis = _desenhar_contornos(img, estado, vista, alcas=modo in ("Mover pontos", "Remover ponto"),
+                                  sintoma=sintoma, alvo=MODOS_DESENHO.get(modo, "pol"))
+        c_img, c_mini = st.columns([5, 1])
+        with c_img:
+            ev = streamlit_image_coordinates(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB), width="content",
+                                             key=f"clique_{chave}", click_and_drag=True,
+                                             cursor="grab" if modo == "Navegar" else "crosshair")
+        c_mini.image(_minimapa(img, vista), channels="BGR", caption="Área mostrada", width="stretch")
         if ev and ev.get("unix_time") != estado["t"] and "x1" in ev:
             estado["t"] = ev["unix_time"]
-            # Coordenadas do evento estão na imagem exibida; converte para a imagem original.
-            fx, fy = W / ev["width"], H / ev["height"]
-            p1 = np.array([ev["x1"] * fx, ev["y1"] * fy])
-            p2 = np.array([min(max(ev["x2"], 0), ev["width"]) * fx,
-                           min(max(ev["y2"], 0), ev["height"]) * fy])
-            raio = RAIO_ALCA * fx
-            arrastou = np.hypot(*(p2 - p1)) > 3 * fx
-            if modo == "Mover pontos":
+            # Evento em px da imagem exibida (o navegador pode reduzi-la) -> vista -> original.
+            x0, y0, _, _, s_v = vista
+            k = vis.shape[1] / ev["width"] / s_v           # px exibido -> px da imagem original
+            p1 = np.array([x0 + ev["x1"] * k, y0 + ev["y1"] * k])
+            p2 = np.array([x0 + min(max(ev["x2"], 0), ev["width"]) * k,
+                           y0 + min(max(ev["y2"], 0), ev["height"]) * k])
+            raio = RAIO_ALCA * k
+            arrastou = np.hypot(*(p2 - p1)) > 3 * k
+            if modo == "Navegar":
+                if arrastou:  # parte do centro da janela visível (arrastar além da borda não acumula)
+                    x0, y0, ww, wh, _ = vista
+                    estado["centro"] = [x0 + ww / 2 - (p2 - p1)[0], y0 + wh / 2 - (p2 - p1)[1]]
+                else:  # clique: centraliza ali; na vista inteira, já aproxima 4×
+                    estado["centro"] = p2.tolist()
+                    if estado.get("zoom", 1) == 1:
+                        estado["zoom"] = 4
+            elif modo == "Mover pontos":
                 alvo = _ponto_mais_proximo(estado["pol"], p1, raio)
                 if alvo and arrastou:
                     guardar()
@@ -286,9 +415,9 @@ def editor_contorno(conteudo: bytes, params: dict) -> dict:
                 if alvo and len(estado["pol"][alvo[0]]) > 3:
                     guardar()
                     estado["pol"][alvo[0]].pop(alvo[1])
-            elif modo == "Nova folha":
+            elif modo in MODOS_DESENHO:
                 if len(estado["atual"]) >= 3 and np.hypot(*(p2 - estado["atual"][0])) < raio * 1.5:
-                    fechar()
+                    fechar(modo)
                 else:
                     guardar()
                     estado["atual"].append(p2.tolist())
@@ -303,24 +432,29 @@ def editor_contorno(conteudo: bytes, params: dict) -> dict:
         b1, b2, b3, b4 = st.columns(4)
         b1.button("↶ Desfazer", on_click=desfazer, disabled=not estado["hist"], key=f"desf_{chave}",
                   width="stretch")
-        if modo == "Nova folha":
-            b2.button("✔ Fechar folha", on_click=fechar, disabled=len(estado["atual"]) < 3,
+        if modo in MODOS_DESENHO:
+            texto = {"Nova folha": "✔ Fechar folha", "Marcar mancha": "✔ Fechar mancha",
+                     "Apagar sintoma": "✔ Fechar área"}[modo]
+            b2.button(texto, on_click=fechar, args=(modo,), disabled=len(estado["atual"]) < 3,
                       key=f"fechar_{chave}", width="stretch")
-        if b3.button("↺ Restaurar a automática", key=f"rest_{chave}", width="stretch"):
+        if b3.button("↺ Restaurar a automática", key=f"rest_{chave}", width="stretch",
+                     help="Recarrega o contorno automático das folhas (mantém as manchas)."):
             carregar_automatica()
             st.rerun()
         b4.button("✖ Descartar edição", on_click=descartar, key=f"desc_{chave}", width="stretch",
-                  help="Volta a usar a detecção automática nesta imagem.")
-        estado["recortar"] = st.checkbox(
-            "Ajustar o contorno à borda real da folha", value=estado["recortar"], key=f"rec_{chave}",
-            help="Tira de dentro do contorno o fundo que ficou incluído (preto, papel, grade). Útil "
-                 "para folhas desenhadas do zero; desligado na edição da seleção automática, para "
-                 "respeitar a borda que você ajustou.")
+                  help="Apaga todas as edições (folhas e manchas) e volta à análise automática.")
+        if estado["pol"] or modo in ("Mover pontos", "Remover ponto", "Nova folha", "Excluir folha"):
+            estado["recortar"] = st.checkbox(
+                "Ajustar o contorno à borda real da folha", value=estado["recortar"],
+                key=f"rec_{chave}",
+                help="Tira de dentro do contorno o fundo que ficou incluído (preto, papel, grade). "
+                     "Útil para folhas desenhadas do zero; desligado na edição da seleção "
+                     "automática, para respeitar a borda que você ajustou.")
         if estado["atual"]:
-            st.info(f"Folha nova em andamento: {len(estado['atual'])} ponto(s). Feche a folha para "
-                    "ela entrar na análise.")
-        elif not estado["pol"]:
-            st.info("Nenhuma folha na seleção: a imagem continua com a detecção automática.")
+            st.info(f"Contorno em andamento: {len(estado['atual'])} ponto(s). Feche clicando perto "
+                    "do primeiro ponto ou no botão ✔.")
+        elif not estado["pol"] and modo in ("Mover pontos", "Remover ponto", "Excluir folha"):
+            st.info("Nenhuma folha editada: a imagem usa a seleção automática de folhas.")
     return estado
 
 
@@ -504,15 +638,7 @@ for nome, conteudo in entradas:
     if modo == MODO_FOTO:
         # Contorno manual (se houver) substitui a detecção automática só desta imagem.
         estado = editor_contorno(conteudo, params)
-        if estado["pol"]:
-            # O limiar de sintoma sai do verde de todas as folhas; na edição ele fica o da
-            # detecção automática, para que mexer numa folha não mude a avaliação das outras.
-            limiar = params["limiar_a"]
-            if limiar is None:
-                auto = rodar_foto(conteudo, params)
-                limiar = auto.folhas[0].limiar_a if auto.folhas else None
-            params_img = dict(params, poligonos=tuple(tuple(map(tuple, p)) for p in estado["pol"]),
-                              recortar_manual=estado["recortar"], limiar_a=limiar)
+        params_img = params_da_imagem(params, estado, conteudo)
     try:
         with st.spinner("Analisando…"):
             res = (rodar_diagramatica(conteudo, params_img) if modo == MODO_DIAG

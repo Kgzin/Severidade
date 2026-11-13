@@ -54,6 +54,8 @@ class ParamsFoto:
     forte: int = 8                    # 'a' >= limiar + forte é sintoma mesmo sem ser escuro
     # Contorno manual: polígonos ((x, y), ...) em px da imagem original; substituem a detecção.
     excluir_furos: bool = True        # fundo visível dentro da folha (furo, rasgo) não é folha nem lesão
+    lesoes_add: tuple = ()            # manchas marcadas à mão (polígonos, px da imagem original)
+    lesoes_rem: tuple = ()            # áreas onde o sintoma detectado é apagado (idem)
     poligonos: tuple = ()
     recortar_manual: bool = True      # tira do polígono o fundo (preto/papel liso) que ficou dentro
 
@@ -331,6 +333,15 @@ def _nao_fundo(img_bgr: np.ndarray) -> np.ndarray | None:
     return segmentar_folha(img_bgr, ParamsFoto())[0] > 0
 
 
+def _poligonos_mascara(pols: tuple, forma: tuple[int, int], f: float) -> np.ndarray:
+    """Polígonos em px da imagem original -> máscara na escala de processamento."""
+    m = np.zeros(forma, np.uint8)
+    for pol in pols:
+        if len(pol) >= 3:
+            cv2.fillPoly(m, [np.round(np.asarray(pol, float) * f).astype(np.int32)], 1)
+    return m > 0
+
+
 def _fundo_visivel(img_bgr: np.ndarray) -> np.ndarray | None:
     """Pixels com cara de fundo, para tirar furos e rasgos de dentro das folhas.
 
@@ -518,9 +529,18 @@ def analisar(img_bgr: np.ndarray, params: ParamsFoto | None = None) -> Resultado
         sintoma = (a_fino >= limiar + p.forte) | ((a_fino >= limiar - 5) & escuro)
     else:
         sintoma = a_fino >= limiar
+    # Correções do avaliador: manchas marcadas à mão entram como sintoma; áreas apagadas saem.
+    # Só valem dentro das folhas (o recorte de folha não muda).
+    marcada = _poligonos_mascara(p.lesoes_add, (H, W), f) if p.lesoes_add else None
+    apagada = _poligonos_mascara(p.lesoes_rem, (H, W), f) if p.lesoes_rem else None
 
     for i, (folha, nucleo) in enumerate(regioes, start=1):
-        lesao_u8 = (nucleo & sintoma).astype(np.uint8) * 255
+        lesao = nucleo & sintoma
+        if marcada is not None:   # marcada à mão vale até a borda da folha, não só no núcleo
+            lesao |= folha & marcada
+        if apagada is not None:
+            lesao &= ~apagada
+        lesao_u8 = lesao.astype(np.uint8) * 255
         if p.area_min_lesao > 0 and lesao_u8.any():
             lesao_u8 = pcv.fill(lesao_u8, size=p.area_min_lesao)
 
