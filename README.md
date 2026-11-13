@@ -96,6 +96,14 @@ padrão das escalas diagramáticas (folha branca com contorno preto, sintomas em
      a avaliação das outras). O preto do fundo removido nunca conta como folha. **Desenhar do
      zero** começa sem contornos, com ajuste automático à borda real da folha.
      Arrastar exige mouse (não funciona em tela de toque).
+   - **Furos e rasgos** (opção "Excluir furos e rasgos", ligada por padrão): onde o fundo
+     aparece dentro da folha — o preto do fundo removido ou a mesma cor do papel — o pixel sai
+     da área da folha e não conta como lesão (antes era contado como mancha escura). A tabela
+     por folha mostra a área de furos/rasgos. Desligue se a doença deixar o tecido da cor do
+     fundo (ex.: oídio muito branco sobre papel branco). Em foto de campo nada é excluído.
+   - **Remover fundo** (botão abaixo da imagem original): baixa a imagem em resolução cheia
+     com o fundo retirado pela seleção de folhas do app (automática ou editada), em PNG
+     transparente ou com fundo preto; furos e rasgos saem vazados.
 2. Sintoma: canal `a` do LAB (eixo verde ↔ vermelho; 128 = sem cor). Todo sintoma deixa de
    ser verde — necrose bege/marrom, clorose e halos amarelos, pústulas alaranjadas, manchas
    pretas, oídio branco. Limiar automático relativo ao verde sadio da imagem: percentil 10

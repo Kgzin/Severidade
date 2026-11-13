@@ -53,6 +53,7 @@ class ParamsFoto:
     contraste_escuro: float = 3.0     # quanto (L, 0-255) a mancha é mais escura que a vizinhança
     forte: int = 8                    # 'a' >= limiar + forte é sintoma mesmo sem ser escuro
     # Contorno manual: polígonos ((x, y), ...) em px da imagem original; substituem a detecção.
+    excluir_furos: bool = True        # fundo visível dentro da folha (furo, rasgo) não é folha nem lesão
     poligonos: tuple = ()
     recortar_manual: bool = True      # tira do polígono o fundo (preto/papel liso) que ficou dentro
 
@@ -67,6 +68,7 @@ class FolhaFoto:
     n_lesoes: int
     area_media_lesao_px: float
     limiar_a: int                     # limiar de 'a' usado nesta folha
+    area_furos_px: int = 0            # furos/rasgos (fundo visível dentro da folha), fora da área
 
 
 @dataclass
@@ -329,6 +331,33 @@ def _nao_fundo(img_bgr: np.ndarray) -> np.ndarray | None:
     return segmentar_folha(img_bgr, ParamsFoto())[0] > 0
 
 
+def _fundo_visivel(img_bgr: np.ndarray) -> np.ndarray | None:
+    """Pixels com cara de fundo, para tirar furos e rasgos de dentro das folhas.
+
+    - fundo removido (preto): preto do fundo (máx. dos canais <= 20);
+    - papel liso ou gabarito: mesma cor do papel (distância < 5 em a/b) e clareza perto da
+      dele. Lesões e nervura têm cor própria e não entram; oídio muito branco sobre papel
+      branco pode entrar — por isso a exclusão é opcional.
+    - foto de campo (fundo sem cor única): None, nada é excluído.
+    """
+    if _fundo_preto(img_bgr):
+        return cv2.medianBlur(img_bgr, 3).max(axis=2) <= 20
+    lab = cv2.cvtColor(cv2.medianBlur(img_bgr, 5), cv2.COLOR_BGR2LAB).astype(np.float32)
+    H, W = lab.shape[:2]
+    b = max(2, min(H, W) // 50)
+    moldura = np.concatenate([lab[:b].reshape(-1, 3), lab[-b:].reshape(-1, 3),
+                              lab[:, :b].reshape(-1, 3), lab[:, -b:].reshape(-1, 3)])
+    croma = lambda x: np.hypot(x[..., 1] - 128, x[..., 2] - 128)
+    papel = moldura[(croma(moldura) < 10) & (moldura[:, 0] > 140)]
+    if len(papel) < 0.15 * len(moldura):
+        return None
+    l_papel, a_papel, b_papel = (float(v) for v in np.median(papel, axis=0))
+    # Mesma cor do papel (não só "neutro"): a nervura esbranquiçada é quase neutra, mas
+    # puxa para o amarelo-esverdeado e o papel não.
+    return ((np.hypot(lab[..., 1] - a_papel, lab[..., 2] - b_papel) < 5)
+            & (lab[..., 0] > l_papel - 35))
+
+
 def _rotulos_manuais(img_bgr: np.ndarray, p: "ParamsFoto", f: float) -> tuple[np.ndarray, list[int]]:
     """Imagem de rótulos a partir dos polígonos (coordenadas da imagem original)."""
     H, W = img_bgr.shape[:2]
@@ -452,9 +481,17 @@ def analisar(img_bgr: np.ndarray, params: ParamsFoto | None = None) -> Resultado
     folhas: list[FolhaFoto] = []
     lesoes: list[Lesao] = []
 
-    regioes = []
+    # Furos e rasgos: o fundo aparece dentro da folha e o preenchimento de buracos (que existe
+    # para incluir lesões internas) o colocaria na folha, onde seria contado como lesão.
+    fundo_vis = _fundo_visivel(img_bgr) if p.excluir_furos else None
+    regioes, furos = [], []
     for r in objs:
         folha = rotulos == r
+        if fundo_vis is not None:
+            furos.append(int((folha & fundo_vis).sum()))
+            folha = folha & ~fundo_vis
+        else:
+            furos.append(0)
         # Faixas (cana, milho, gramíneas) não têm pecíolo: a abertura cortaria faixas finas ou
         # sobrepostas. Só folhas inteiras, não alongadas, passam pela remoção.
         if (p.remover_peciolo and modo_fundo not in ("gabarito", "manual")
@@ -499,7 +536,8 @@ def analisar(img_bgr: np.ndarray, params: ParamsFoto | None = None) -> Resultado
         x, y, w, h = cv2.boundingRect(folha.astype(np.uint8))
         folhas.append(FolhaFoto(i, (x, y, w, h), area_folha, area_lesao,
                                 100 * int((lesao_u8 > 0).sum()) / int(folha.sum()), n_les,
-                                area_lesao / n_les if n_les else 0.0, limiar))
+                                area_lesao / n_les if n_les else 0.0, limiar,
+                                round(furos[i - 1] / f2)))
         folha_total[folha] = 255
         lesao_total |= lesao_u8
 

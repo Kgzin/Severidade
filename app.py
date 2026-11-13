@@ -69,6 +69,21 @@ def rodar_foto(conteudo: bytes, params: dict):
     return foto.analisar(decodificar(conteudo), foto.ParamsFoto(**params))
 
 
+@st.cache_data(show_spinner=False, max_entries=8)
+def sem_fundo(conteudo: bytes, mascara: np.ndarray, fundo_preto: bool) -> bytes:
+    """Imagem original (resolução cheia) com o fundo retirado pela máscara das folhas."""
+    img = decodificar(conteudo)
+    H, W = img.shape[:2]
+    m = cv2.resize(mascara, (W, H), interpolation=cv2.INTER_NEAREST) > 0
+    if fundo_preto:
+        out = img.copy()
+        out[~m] = 0
+    else:
+        out = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+        out[..., 3] = np.where(m, 255, 0).astype(np.uint8)
+    return cv2.imencode(".png", out)[1].tobytes()
+
+
 def tema_escuro() -> bool:
     try:
         return st.context.theme.type == "dark"
@@ -421,6 +436,11 @@ with st.sidebar:
                                     "antes da análise: contornos mais precisos. Áreas continuam em "
                                     "px da imagem original."):
                 pf.resolucao_min = 0
+            pf.excluir_furos = st.checkbox(
+                "Excluir furos e rasgos", pf.excluir_furos,
+                help="Onde o fundo aparece dentro da folha (furo, rasgo), o pixel sai da área da "
+                     "folha e não conta como lesão. Desligue se a doença deixa o tecido da mesma "
+                     "cor do fundo (ex.: oídio muito branco sobre papel branco).")
             pf.area_min_lesao = st.number_input("Área mínima de lesão (px)", 0, 5000, pf.area_min_lesao)
             pf.borda_px = st.slider("Margem da folha ignorada (px)", 0, 10, pf.borda_px,
                                     help="Pixels da borda misturam folha e fundo e podem parecer lesão.")
@@ -517,6 +537,17 @@ for nome, conteudo in entradas:
                     caption="Contorno laranja: folha · magenta: sintoma")
         col_b.download_button("Baixar P&B (PNG)", png(res.preto_branco),
                               f"{Path(nome).stem}_pb.png", "image/png", key=f"pb_{nome}")
+        if res.folhas:
+            with col_a.popover("🖼 Remover fundo", width="stretch"):
+                st.caption("Imagem original com o fundo retirado pela seleção de folhas do app "
+                           "(automática ou editada), já com furos e rasgos vazados. Corrija a "
+                           "seleção no editor antes, se precisar.")
+                st.download_button("PNG transparente", sem_fundo(conteudo, res.mascara_folha, False),
+                                   f"{Path(nome).stem}-nobg.png", "image/png",
+                                   key=f"nobg_{nome}", width="stretch")
+                st.download_button("Fundo preto", sem_fundo(conteudo, res.mascara_folha, True),
+                                   f"{Path(nome).stem}-preto.png", "image/png",
+                                   key=f"preto_{nome}", width="stretch")
 
     if modo == MODO_DIAG:
         ponderada = medida.startswith("Ponderada")
@@ -574,7 +605,7 @@ for nome, conteudo in entradas:
                 linha["Nota atribuída"], linha["Nota (% ref.)"] = escala.classificar(f.severidade)
             linha |= {"Nº lesões": f.n_lesoes, "Área média lesão (px)": round(f.area_media_lesao_px, 1),
                       "Área folha (px)": f.area_folha_px, "Área lesão (px)": f.area_lesao_px,
-                      "Limiar 'a'": f.limiar_a}
+                      "Furos/rasgos (px)": f.area_furos_px, "Limiar 'a'": f.limiar_a}
             linhas.append(linha)
         st.caption(f"Fundo detectado: **{res.modo_fundo}** · limiar de verde ('a'): "
                    + ", ".join(str(v) for v in sorted({f.limiar_a for f in res.folhas})))
