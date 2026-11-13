@@ -116,13 +116,18 @@ def _mascara_exg(img_bgr: np.ndarray, p: ParamsFoto) -> np.ndarray:
         verde = pcv.threshold.binary(exg_u8, p.limiar_folha, object_type="light")
 
     # Nervura central esbranquiçada (cana, milho, sorgo) tem ExG baixo e dividiria a faixa em
-    # duas metades. Ela ainda é levemente verde no canal 'a' (≈115–119) e o papel não (≈126):
-    # entra o que estiver abaixo do meio-termo entre o 'a' da folha e o do fundo, desde que
-    # ligado a tecido verde.
-    canal_a = cv2.cvtColor(cv2.medianBlur(img_bgr, 5), cv2.COLOR_BGR2LAB)[..., 1]
+    # duas metades. Ela continua com o amarelado (canal 'b') da folha e um resto de verde
+    # (canal 'a'), enquanto papel, grade e números são neutros/azulados, a tinta da grade é
+    # vermelha e a sujeira do papel é amarelada mas sem verde. Entra o que, ligado a tecido
+    # verde, for mais verde que o meio-termo folha/fundo no canal 'a' OU amarelado como folha
+    # e ainda um pouco verde (a pelo menos 2 abaixo do papel).
+    lab = cv2.cvtColor(cv2.medianBlur(img_bgr, 5), cv2.COLOR_BGR2LAB).astype(np.int16)
+    canal_a, canal_b = lab[..., 1], lab[..., 2]
     if verde.any() and (~(verde > 0)).any():
-        corte = (np.median(canal_a[verde > 0]) + np.median(canal_a[verde == 0])) / 2
-        uniao = ((verde > 0) | (canal_a < corte)).astype(np.uint8)
+        a_f, b_f = np.median(canal_a[verde == 0]), np.median(canal_b[verde == 0])
+        corte = (np.median(canal_a[verde > 0]) + a_f) / 2
+        nervura = (canal_a < corte) | ((canal_b - b_f > 6) & (canal_a - a_f <= -2))
+        uniao = ((verde > 0) | nervura).astype(np.uint8)
         n, rot = cv2.connectedComponents(uniao, connectivity=8)
         ligados = np.zeros(n, bool)
         ligados[np.unique(rot[verde > 0])] = True
@@ -131,7 +136,8 @@ def _mascara_exg(img_bgr: np.ndarray, p: ParamsFoto) -> np.ndarray:
 
     k = max(3, int(0.006 * min(H, W)) | 1)
     verde = cv2.morphologyEx(verde, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
-    return pcv.fill_holes(pcv.fill(verde, size=p.area_min_ruido))
+    verde = _separar_faixas(pcv.fill(verde, size=p.area_min_ruido))
+    return pcv.fill_holes(verde)
 
 
 def _varias_folhas(mask: np.ndarray, frac_min: float = 0.002) -> bool:
@@ -173,10 +179,64 @@ def _mascara_preto(img_bgr: np.ndarray, p: ParamsFoto) -> np.ndarray:
     corte = p.limiar_folha if p.limiar_folha is not None else 20
     mask = (mx > corte).astype(np.uint8) * 255
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    return pcv.fill_holes(pcv.fill(mask, size=p.area_min_ruido))
+    mask = _separar_faixas(pcv.fill(mask, size=p.area_min_ruido))
+    return pcv.fill_holes(mask)
+
+
+def _abrir(m: np.ndarray, k: tuple[int, int]) -> np.ndarray:
+    el = cv2.getStructuringElement(cv2.MORPH_RECT, (max(1, k[0]), max(1, k[1])))
+    return cv2.morphologyEx(m.astype(np.uint8), cv2.MORPH_OPEN, el) > 0
+
+
+def _n_objetos(m: np.ndarray, frac: float = 0.002) -> int:
+    _, _, st, _ = cv2.connectedComponentsWithStats(m.astype(np.uint8), connectivity=8)
+    return int((st[1:, cv2.CC_STAT_AREA] > frac * m.size).sum())
+
+
+def _n_estreitos(m: np.ndarray, eixo: int) -> int:
+    """Objetos com largura < 20% da foto no eixo dado (1 = largura, 0 = altura)."""
+    _, _, st, _ = cv2.connectedComponentsWithStats(m.astype(np.uint8), connectivity=8)
+    lado = st[1:, cv2.CC_STAT_WIDTH] if eixo == 1 else st[1:, cv2.CC_STAT_HEIGHT]
+    return int(((st[1:, cv2.CC_STAT_AREA] > 0.002 * m.size) & (lado < 0.2 * m.shape[eixo])).sum())
+
+
+def _separar_faixas(mask: np.ndarray) -> np.ndarray:
+    """Lotes de faixas de folha (cana, milho): tira suportes transversais (colmos, réguas).
+
+    1. Orientação: as faixas são as estruturas longas (>= 50% da foto) mais numerosas,
+       verticais ou horizontais. Com menos de 3 delas não é um lote de faixas: nada muda.
+    2. Suportes: estruturas retas perpendiculares às faixas, com >= 25% da foto (colmos ou
+       réguas que prendem as faixas). Por serem verdes, uniam todas as faixas num objeto só.
+    (A nervura central esbranquiçada é incluída pela cor, em _mascara_exg.)
+    """
+    m = mask > 0
+    H, W = m.shape
+    # Buracos pequenos (lesões) preenchidos antes de decidir; os grandes (papel cercado por
+    # faixas e suportes) não, senão o lote vira um bloco só.
+    n, rot, st, _ = cv2.connectedComponentsWithStats((~m).astype(np.uint8), connectivity=4)
+    pequenos = np.zeros(n, bool)
+    pequenos[1:] = st[1:, cv2.CC_STAT_AREA] < 0.01 * m.size
+    m = m | pequenos[rot]
+    # Faixas = estruturas longas (>= 50% da foto) e estreitas (< 20% na outra direção). Uma
+    # folha inteira de foto de campo é longa mas larga: não conta, e nada é fatiado.
+    nv = _n_estreitos(_abrir(m, (1, int(0.5 * H))), eixo=1)
+    nh = _n_estreitos(_abrir(m, (int(0.5 * W), 1)), eixo=0)
+    if max(nv, nh) < 3:
+        return mask.astype(np.uint8) * 255 if mask.dtype == bool else mask
+    vertical = nv >= nh
+    barras = _abrir(m, (int(0.25 * W), 1)) if vertical else _abrir(m, (1, int(0.25 * H)))
+    if barras.any():
+        folga = cv2.getStructuringElement(cv2.MORPH_RECT, (max(3, int(0.02 * W)), max(3, int(0.02 * H))))
+        m &= ~(cv2.dilate(barras.astype(np.uint8), folga) > 0)
+    return m.astype(np.uint8) * 255  # quem chama preenche os buracos depois
 
 
 def segmentar_folha(img_bgr: np.ndarray, p: ParamsFoto) -> tuple[np.ndarray, str]:
+    """Retorna (máscara das folhas, modo de fundo: "preto", "uniforme", "gabarito" ou "complexo")."""
+    return _segmentar(img_bgr, p)
+
+
+def _segmentar(img_bgr: np.ndarray, p: ParamsFoto) -> tuple[np.ndarray, str]:
     """Retorna (máscara das folhas, modo de fundo: "preto", "uniforme", "gabarito" ou "complexo")."""
     modo = p.modo_fundo
     if modo == "preto" or (modo == "auto" and _fundo_preto(img_bgr)):

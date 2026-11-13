@@ -72,6 +72,11 @@ padrão das escalas diagramáticas (folha branca com contorno preto, sintomas em
      esbranquiçada é incluída pelo canal `a`. Todas as folhas são analisadas, sem remoção de
      pecíolo. Escolhido automaticamente quando há 3+ folhas de tamanho parecido e o fundo
      uniforme "engoliria" a impressão do quadro.
+   - **Lotes de faixas** (fundo preto e gabarito): suportes retos perpendiculares às faixas
+     (colmos ou réguas que prendem as faixas, >= 25% da foto) são retirados antes de separar
+     as folhas — por serem verdes, uniam todas as faixas num objeto só. A nervura central
+     esbranquiçada entra pela cor: amarelada como a folha e ainda um pouco verde, diferente
+     do papel (neutro/azulado), da tinta (vermelha) e da sujeira do papel (amarelada sem verde).
    - **Complexo** (foto de campo: folha encostando na borda, vasos, solo, outras plantas):
      folha = pixels verdes (canal `a` baixo) + fechamento morfológico e `fill_holes` para
      incluir as manchas. Só a maior folha é analisada.
