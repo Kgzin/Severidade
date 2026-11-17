@@ -8,3 +8,4 @@ pandas==3.0.6
 altair==5.5.0
 pillow-heif==1.8.0
 streamlit-image-coordinates==0.4.1
+scikit-learn==1.9.1

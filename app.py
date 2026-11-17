@@ -18,7 +18,7 @@ import streamlit as st
 from PIL import Image, ImageOps
 from streamlit_image_coordinates import streamlit_image_coordinates
 
-from analise import diagramatica, foto, graficos
+from analise import classificador, diagramatica, foto, graficos
 from analise.escala import ESCALAS, escala_de_texto
 
 EXEMPLOS = Path(__file__).parent / "exemplos"
@@ -111,8 +111,10 @@ def mostrar_graficos(linhas: pd.DataFrame, escala, chave: str) -> None:
 
 LARGURA_EDITOR = 1100  # px da imagem exibida no editor de contorno
 RAIO_ALCA = 10         # px (na imagem exibida) para "pegar" um ponto
-MODOS_EDICAO = ["Navegar", "Mover pontos", "Remover ponto", "Nova folha", "Excluir folha",
-                "Marcar mancha", "Apagar sintoma"]
+MODOS_EDICAO = ["Navegar", "Pincel lesão", "Pincel sadio", "Marcar mancha", "Apagar sintoma",
+                "Mover pontos", "Remover ponto", "Nova folha", "Excluir folha"]
+MODOS_PINCEL = {"Pincel lesão": "lesao", "Pincel sadio": "sadio"}
+_COR_PINCEL = {"lesao": (0, 0, 255), "sadio": (0, 200, 0)}  # BGR
 MODOS_DESENHO = {"Nova folha": "pol", "Marcar mancha": "add", "Apagar sintoma": "rem"}
 _COR_DESENHO = {"pol": (255, 0, 255), "add": (0, 0, 255), "rem": (255, 200, 0)}  # BGR
 # Cores das folhas no editor (BGR): ciclo só para separar folhas vizinhas; o número identifica.
@@ -190,6 +192,12 @@ def _desenhar_contornos(img: np.ndarray, estado: dict, vista: tuple, alcas: bool
     for lista in ("add", "rem"):
         for pol in estado.get(lista, []):
             cv2.polylines(vis, [T(pol)], True, _COR_DESENHO[lista], 2, cv2.LINE_AA)
+    for tipo, x1, y1, x2, y2, r in estado.get("pinc", []):
+        a, b = T([[x1, y1]])[0], T([[x2, y2]])[0]
+        esp = max(1, round(2 * r * s))
+        cv2.line(vis, tuple(map(int, a)), tuple(map(int, b)), _COR_PINCEL[tipo], esp, cv2.LINE_AA)
+        cv2.circle(vis, tuple(map(int, a)), max(1, esp // 2), _COR_PINCEL[tipo], -1, cv2.LINE_AA)
+        cv2.circle(vis, tuple(map(int, b)), max(1, esp // 2), _COR_PINCEL[tipo], -1, cv2.LINE_AA)
     for i, pol in enumerate(estado["pol"]):
         cor = _CORES_EDITOR[i % len(_CORES_EDITOR)]
         pts = T(pol)
@@ -271,6 +279,8 @@ def params_da_imagem(params: dict, estado: dict, conteudo: bytes) -> dict:
         extra["lesoes_add"] = tuple(tuple(map(tuple, p)) for p in estado["add"])
     if estado["rem"]:
         extra["lesoes_rem"] = tuple(tuple(map(tuple, p)) for p in estado["rem"])
+    if estado.get("pinc"):
+        extra["pinceladas"] = tuple(tuple(x) for x in estado["pinc"])
     return dict(params, **extra) if extra else params
 
 
@@ -284,10 +294,11 @@ def editor_contorno(conteudo: bytes, params: dict) -> dict:
                                       "hist": []})
     estado.setdefault("add", [])
     estado.setdefault("rem", [])
+    estado.setdefault("pinc", [])
     chave_modo = f"modo_{chave}"
 
     def guardar():  # histórico para "Desfazer"
-        estado["hist"].append(copy.deepcopy({k: estado[k] for k in ("pol", "atual", "add", "rem")}))
+        estado["hist"].append(copy.deepcopy({k: estado[k] for k in ("pol", "atual", "add", "rem", "pinc")}))
         del estado["hist"][:-50]
 
     def carregar_automatica():
@@ -315,10 +326,10 @@ def editor_contorno(conteudo: bytes, params: dict) -> dict:
             estado.update(estado["hist"].pop())
 
     def descartar():
-        estado.update(pol=[], atual=[], add=[], rem=[], hist=[], editando=False)
+        estado.update(pol=[], atual=[], add=[], rem=[], pinc=[], hist=[], editando=False)
 
     editando = bool(estado["pol"] or estado["atual"] or estado["add"] or estado["rem"]
-                    or estado.get("editando"))
+                    or estado["pinc"] or estado.get("editando"))
     partes = []
     if estado["pol"]:
         partes.append(f"{len(estado['pol'])} folha(s) editada(s)")
@@ -326,6 +337,9 @@ def editor_contorno(conteudo: bytes, params: dict) -> dict:
         partes.append(f"{len(estado['add'])} mancha(s) marcada(s)")
     if estado["rem"]:
         partes.append(f"{len(estado['rem'])} área(s) de sintoma apagada(s)")
+    if estado["pinc"]:
+        n_l = sum(1 for x in estado["pinc"] if x[0] == "lesao")
+        partes.append(f"{n_l} pincelada(s) de lesão, {len(estado['pinc']) - n_l} de sadio")
     rotulo = "✏️ Editar folhas e manchas" + (" — " + ", ".join(partes) if partes else "")
     with st.expander(rotulo, expanded=editando):
         if not editando:
@@ -339,14 +353,16 @@ def editor_contorno(conteudo: bytes, params: dict) -> dict:
                 comecar("Mover pontos")
                 st.rerun()
             c2.button("🔴 Marcar / apagar manchas", key=f"manchas_{chave}", width="stretch",
-                      on_click=comecar, args=("Marcar mancha",))
+                      on_click=comecar, args=("Pincel lesão",))
             c3.button("Desenhar folhas do zero", key=f"zero_{chave}", width="stretch",
                       on_click=comecar, args=("Nova folha", True))
             return estado
 
         modo = st.radio("Ferramenta", MODOS_EDICAO, horizontal=True, key=chave_modo,
                         help="Navegar: arraste para mover a vista ou clique para centralizar nesse "
-                             "ponto; na vista inteira, o clique já aproxima 4× ali. Mover pontos: arraste um ponto até a nova posição; clique na borda, "
+                             "ponto; na vista inteira, o clique já aproxima 4× ali. Pincel lesão / "
+                             "Pincel sadio: clique (ou arraste) sobre os pixels de lesão ou de tecido "
+                             "sadio — corrigem esta foto e ensinam o modelo de sintomas. Mover pontos: arraste um ponto até a nova posição; clique na borda, "
                              "fora de um ponto, para criar um ponto novo ali. Remover ponto: clique "
                              "no ponto. Nova folha: clique em volta dela, ponto a ponto, e feche "
                              "clicando perto do primeiro ponto. Excluir folha: clique dentro dela. "
@@ -370,10 +386,18 @@ def editor_contorno(conteudo: bytes, params: dict) -> dict:
                    "centralizar, arraste para mover a vista.")
         vista = vista_editor(estado, W, H)
         sintoma = None
-        if modo in ("Marcar mancha", "Apagar sintoma"):
+        if modo in MODOS_PINCEL:
+            estado["pincel"] = st.select_slider(
+                "Tamanho do pincel (px na tela)", [2, 4, 8, 16, 32], value=estado.get("pincel", 4),
+                key=f"pincel_{chave}",
+                help="Com zoom alto, um pincel pequeno pinta só os pixels da mancha. Pinte a lesão "
+                     "de perto; para o tecido sadio, pinte também o que confunde (nervuras, bordas, "
+                     "reflexos).")
+        if modo in ("Marcar mancha", "Apagar sintoma") or modo in MODOS_PINCEL:
             sintoma = rodar_foto(conteudo, params_da_imagem(params, estado, conteudo)).mascara_lesao
             st.caption("Em vermelho: o que a análise está contando como sintoma agora. "
-                       "Contorno vermelho: manchas marcadas à mão · azul-claro: áreas apagadas.")
+                       "Contorno vermelho: manchas marcadas à mão · azul-claro: áreas apagadas · "
+                       "traço vermelho/verde: pinceladas de lesão/sadio.")
         vis = _desenhar_contornos(img, estado, vista, alcas=modo in ("Mover pontos", "Remover ponto"),
                                   sintoma=sintoma, alvo=MODOS_DESENHO.get(modo, "pol"))
         c_img, c_mini = st.columns([5, 1])
@@ -392,7 +416,13 @@ def editor_contorno(conteudo: bytes, params: dict) -> dict:
                            y0 + min(max(ev["y2"], 0), ev["height"]) * k])
             raio = RAIO_ALCA * k
             arrastou = np.hypot(*(p2 - p1)) > 3 * k
-            if modo == "Navegar":
+            if modo in MODOS_PINCEL:
+                guardar()
+                r = estado.get("pincel", 4) / 2 * k
+                a = p1.tolist()
+                b = p2.tolist() if arrastou else a
+                estado["pinc"].append([MODOS_PINCEL[modo], a[0], a[1], b[0], b[1], r])
+            elif modo == "Navegar":
                 if arrastou:  # parte do centro da janela visível (arrastar além da borda não acumula)
                     x0, y0, ww, wh, _ = vista
                     estado["centro"] = [x0 + ww / 2 - (p2 - p1)[0], y0 + wh / 2 - (p2 - p1)[1]]
@@ -456,6 +486,117 @@ def editor_contorno(conteudo: bytes, params: dict) -> dict:
         elif not estado["pol"] and modo in ("Mover pontos", "Remover ponto", "Excluir folha"):
             st.info("Nenhuma folha editada: a imagem usa a seleção automática de folhas.")
     return estado
+
+
+MODELO_PADRAO = Path(__file__).parent / "modelos" / "padrao.npz"
+
+
+@st.cache_resource(show_spinner="Preparando o modelo de sintomas…", max_entries=4)
+def _modelo_de_bytes(dados: bytes) -> tuple[str, dict]:
+    """Modelo a partir do arquivo de amostras (.npz); registrado para a análise usar."""
+    pacote = classificador.carregar(dados)
+    mid = hashlib.md5(dados).hexdigest()[:12]
+    foto.MODELOS[mid] = pacote
+    return mid, pacote
+
+
+def _ativar_modelo(dados: bytes, origem: str) -> None:
+    mid, pacote = _modelo_de_bytes(dados)
+    foto.MODELOS[mid] = pacote  # o registro pode ter sido limpo se o processo reiniciou
+    st.session_state["modelo"] = {"id": mid, "dados": dados, "origem": origem,
+                                  "n_lesao": pacote["n_lesao"], "n_sadio": pacote["n_sadio"]}
+
+
+def painel_modelo(params: dict, entradas: list[tuple[str, bytes]]) -> dict:
+    """Modelo de sintomas treinado com as marcações (pincéis e contornos de mancha).
+
+    Devolve os parâmetros com o modelo e o método de detecção escolhidos.
+    """
+    if "modelo" not in st.session_state and MODELO_PADRAO.exists():
+        try:
+            _ativar_modelo(MODELO_PADRAO.read_bytes(), "modelo padrão do app")
+        except ValueError:
+            pass
+    info = st.session_state.get("modelo")
+    if info:
+        foto.MODELOS.setdefault(info["id"], _modelo_de_bytes(info["dados"])[1])
+
+    rotulo = "🧠 Modelo de sintomas" + (f" — ativo ({info['origem']})" if info else " — sem modelo")
+    with st.expander(rotulo, expanded=not info):
+        st.caption(
+            "A regra de cor não separa sintomas sutis (pontuações esbranquiçadas, manchas pequenas) "
+            "de nervuras e reflexos. O modelo aprende com exemplos: no editor de cada foto, use "
+            "**Pincel lesão** sobre as manchas e **Pincel sadio** sobre o que confunde; depois "
+            "clique em **Treinar**. Se ele errar numa foto nova, marque mais exemplos e treine de "
+            "novo — os exemplos se acumulam.")
+        anotadas = []
+        for nome, conteudo in entradas:
+            e = st.session_state.get("contornos", {}).get(hashlib.md5(conteudo).hexdigest()[:12])
+            if e and (e.get("pinc") or e.get("add") or e.get("rem")):
+                anotadas.append((nome, conteudo, e))
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            if info:
+                st.markdown(f"**Modelo ativo** ({info['origem']}): {info['n_lesao']:,} px de lesão e "
+                            f"{info['n_sadio']:,} px de tecido sadio como exemplos."
+                            .replace(",", "."))
+            else:
+                st.markdown("**Nenhum modelo ativo**: a detecção usa só a regra de cor.")
+            st.markdown(f"Fotos abertas com marcações: **{len(anotadas)}**"
+                        + (" — " + ", ".join(n for n, _, _ in anotadas) if anotadas else ""))
+            acumular = st.checkbox("Somar aos exemplos do modelo ativo", value=bool(info),
+                                   disabled=not info, key="modelo_acumular",
+                                   help="Ligado: o treino junta os exemplos novos aos do modelo ativo "
+                                        "(o modelo da equipe vai melhorando). Desligado: treina só "
+                                        "com as marcações das fotos abertas.")
+            if st.button("🧠 Treinar com as marcações", type="primary", disabled=not anotadas,
+                         key="modelo_treinar"):
+                with st.spinner("Treinando o modelo…"):
+                    try:
+                        exemplos = [foto.exemplos_treino(
+                            decodificar(conteudo),
+                            foto.ParamsFoto(**params_da_imagem(params, e, conteudo)))
+                            for _, conteudo, e in anotadas]
+                        base = foto.MODELOS.get(info["id"]) if (info and acumular) else None
+                        pacote = classificador.treinar(exemplos, base=base)
+                        _ativar_modelo(classificador.salvar(pacote), "treinado nesta sessão")
+                        st.rerun()
+                    except ValueError as erro:
+                        st.error(f"Não foi possível treinar: {erro} Marque pixels de lesão com o "
+                                 "Pincel lesão (ou contorne manchas) em pelo menos uma foto.")
+        with c2:
+            arq = st.file_uploader("Carregar modelo (.npz)", type=["npz"], key="modelo_upload",
+                                   help="Arquivo salvo por este app (só contém exemplos de treino).")
+            if arq is not None and st.session_state.get("modelo_upload_feito") != arq.file_id:
+                try:
+                    _ativar_modelo(arq.getvalue(), f"arquivo {arq.name}")
+                    st.session_state["modelo_upload_feito"] = arq.file_id
+                    st.rerun()
+                except ValueError as erro:
+                    st.error(str(erro))
+            if info:
+                st.download_button("⬇ Baixar modelo (.npz)", info["dados"], "modelo_sintomas.npz",
+                                   "application/octet-stream", key="modelo_baixar", width="stretch",
+                                   help="Guarde e compartilhe com a equipe. Para virar o modelo padrão "
+                                        "do app, salve-o no repositório como modelos/padrao.npz.")
+                if st.button("Desativar modelo", key="modelo_desativar", width="stretch"):
+                    st.session_state.pop("modelo", None)
+                    st.rerun()
+
+    info = st.session_state.get("modelo")
+    if not info:
+        return dict(params, modelo_id=None, metodo_sintoma="cor")
+    with st.sidebar:
+        st.subheader("Modelo de sintomas")
+        metodos = {"Cor + modelo": "ambos", "Só o modelo": "modelo", "Só a regra de cor": "cor"}
+        escolha = st.radio("Detecção de sintomas", list(metodos), key="modelo_metodo",
+                           help="Cor + modelo: soma o que a regra de cor e o modelo encontram "
+                                "(recomendado). Só o modelo: quando ele já foi treinado também com "
+                                "necroses e manchas grandes. Só a regra de cor: ignora o modelo.")
+        limiar = st.slider("Certeza mínima do modelo", 0.2, 0.9, 0.5, 0.05, key="modelo_limiar",
+                           help="Menor = marca mais manchas (mais sensível, mais falsos positivos). "
+                                "Maior = só o que o modelo tem certeza.")
+    return dict(params, modelo_id=info["id"], metodo_sintoma=metodos[escolha], limiar_modelo=limiar)
 
 
 def fmt(v: float, casas: int = 2) -> str:
@@ -628,6 +769,11 @@ if not entradas:
     st.stop()
 
 
+# ---------------------------------------------------------------- modelo de sintomas
+if modo == MODO_FOTO:
+    params = painel_modelo(params, entradas)
+
+
 # ---------------------------------------------------------------- análise
 resumo: list[dict] = []
 
@@ -764,6 +910,12 @@ for nome, conteudo in entradas:
             m2.image(res.canal_a, width="stretch",
                      caption="Canal 'a' do LAB (escuro = verde; claro = sem verde)")
             m3.image(res.mascara_lesao, caption="Sintomas", width="stretch")
+            if res.prob_modelo is not None:
+                st.image(cv2.applyColorMap(res.prob_modelo, cv2.COLORMAP_INFERNO), channels="BGR",
+                         width="stretch",
+                         caption="Certeza do modelo de que é lesão (escuro = sadio; amarelo = lesão). "
+                                 "Regiões claras não marcadas como sintoma estão abaixo da certeza "
+                                 "mínima; se forem lesão, ensine com o Pincel lesão.")
         resumo.extend(linhas)
 
 

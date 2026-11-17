@@ -175,6 +175,30 @@ tooltip, porque uma rampa de um tom só distingue com segurança até ~8 notas.
 Escalas por valores: nota = valor de referência mais próximo em escala log. Escalas por
 faixas: nota = faixa que contém a severidade medida.
 
+## Modelo de sintomas (aprende com as marcações da equipe)
+
+A regra de cor ("o que deixou de ser verde") pega necroses, ferrugens e cloroses marcadas,
+mas não separa sintomas sutis — pontuações esbranquiçadas, manchas pequenas — de nervuras,
+bordas e reflexos. Para esses casos o app tem um **classificador de pixels treinado com
+exemplos** (floresta aleatória sobre cor, brilho, contraste local em 3 escalas e forma —
+ponto x risco), a mesma ideia dos classificadores do PlantCV, ilastik e Trainable Weka.
+
+Fluxo:
+1. No editor da foto ("✏️ Editar folhas e manchas" → **🔴 Marcar / apagar manchas**), use
+   zoom e o **Pincel lesão** sobre as manchas e o **Pincel sadio** sobre o que confunde
+   (nervuras, bordas, reflexos). As pinceladas já corrigem aquela foto.
+2. No painel **🧠 Modelo de sintomas**, clique em **Treinar com as marcações** (usa todas as
+   fotos abertas que têm marcações).
+3. O modelo passa a valer para todas as fotos. Na barra lateral: **Cor + modelo**
+   (recomendado), **Só o modelo** ou **Só a regra de cor**, e a **certeza mínima**.
+4. Errou numa foto nova? Marque mais exemplos nela e treine de novo — com "Somar aos exemplos
+   do modelo ativo", os exemplos se acumulam.
+5. **Baixar modelo (.npz)** para guardar e compartilhar; **Carregar modelo** para reutilizar.
+   Para virar o modelo padrão do app, salve o arquivo no repositório como `modelos/padrao.npz`.
+
+O arquivo do modelo guarda só as amostras de treino (números, sem pickle): carregar um
+modelo nunca executa código vindo do arquivo; o modelo é retreinado em segundos.
+
 ## Estrutura
 
 ```
@@ -183,6 +207,7 @@ analise/escala.py       escalas de referência e classificação
 analise/diagramatica.py análise de desenhos/escalas P&B
 analise/foto.py         análise de fotos coloridas (qualquer folha/doença) e saída P&B
 analise/graficos.py     gráficos de interpretação nas faixas de nota (Altair)
+analise/classificador.py modelo de sintomas treinado com as marcações (Random Forest)
 exemplos/               escala diagramática de exemplo
 requirements.txt        pacotes Python
 packages.txt            pacotes do sistema (deploy Linux)

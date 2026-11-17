@@ -32,6 +32,10 @@ from plantcv import plantcv as pcv
 
 pcv.params.debug = None
 
+# Modelos de sintomas treinados (classificador.treinar), pela identificação (hash do arquivo).
+# O app registra aqui; a análise usa o id que vem nos parâmetros (entra no cache).
+MODELOS: dict[str, dict] = {}
+
 
 @dataclass
 class ParamsFoto:
@@ -54,6 +58,12 @@ class ParamsFoto:
     forte: int = 8                    # 'a' >= limiar + forte é sintoma mesmo sem ser escuro
     # Contorno manual: polígonos ((x, y), ...) em px da imagem original; substituem a detecção.
     excluir_furos: bool = True        # fundo visível dentro da folha (furo, rasgo) não é folha nem lesão
+    # Anotações do avaliador (px da imagem original). Corrigem a análise da imagem e são os
+    # exemplos de treino do modelo de sintomas.
+    pinceladas: tuple = ()            # ((tipo "lesao"/"sadio", x1, y1, x2, y2, raio), ...)
+    modelo_id: str | None = None      # modelo treinado registrado em MODELOS
+    metodo_sintoma: str = "cor"       # "cor" (regra de cor), "modelo" ou "ambos"
+    limiar_modelo: float = 0.5        # probabilidade mínima para o modelo marcar lesão
     lesoes_add: tuple = ()            # manchas marcadas à mão (polígonos, px da imagem original)
     lesoes_rem: tuple = ()            # áreas onde o sintoma detectado é apagado (idem)
     poligonos: tuple = ()
@@ -99,6 +109,7 @@ class ResultadoFoto:
     canal_a: np.ndarray
     modo_fundo: str
     avisos: list[str] = field(default_factory=list)
+    prob_modelo: np.ndarray | None = None   # 0–255, só quando o modelo foi usado
 
 
 def _mascara_exg(img_bgr: np.ndarray, p: ParamsFoto) -> np.ndarray:
@@ -438,13 +449,13 @@ def _filtro_guiado(guia: np.ndarray, src: np.ndarray, r: int, eps: float) -> np.
     return m(a) * guia + m(b)
 
 
-def analisar(img_bgr: np.ndarray, params: ParamsFoto | None = None) -> ResultadoFoto:
-    p0 = params or ParamsFoto()
-    avisos: list[str] = []
+def preparar(img_bgr: np.ndarray, p0: ParamsFoto) -> tuple[np.ndarray, float, ParamsFoto]:
+    """Imagem na escala de processamento, fator de escala e parâmetros em px dessa escala.
 
-    # Imagens pequenas são ampliadas (bicúbica) antes da análise: os contornos das manchas
-    # ficam com precisão de fração de pixel original. Imagens muito grandes (foto de celular)
-    # são reduzidas para caber na memória do servidor. Áreas são devolvidas em px originais.
+    Imagens pequenas são ampliadas (bicúbica): os contornos das manchas ficam com precisão de
+    fração de pixel original. Imagens muito grandes (foto de celular) são reduzidas para
+    caber na memória do servidor. Áreas são devolvidas em px originais.
+    """
     H0, W0 = img_bgr.shape[:2]
     f = 1.0
     if p0.resolucao_min and min(H0, W0) < p0.resolucao_min:
@@ -458,6 +469,43 @@ def analisar(img_bgr: np.ndarray, params: ParamsFoto | None = None) -> Resultado
                              interpolation=cv2.INTER_CUBIC if f > 1 else cv2.INTER_AREA)
     p = replace(p0, area_min_ruido=round(p0.area_min_ruido * f * f),
                 area_min_lesao=round(p0.area_min_lesao * f * f), borda_px=max(1, round(p0.borda_px * f)))
+    return img_bgr, f, p
+
+
+def mascaras_anotacao(p: ParamsFoto, forma: tuple[int, int], f: float) -> tuple[np.ndarray, np.ndarray]:
+    """(lesão, sadio) marcados pelo avaliador, na escala de processamento.
+
+    Lesão = manchas contornadas + pinceladas de lesão; sadio = áreas de sintoma apagadas +
+    pinceladas de sadio. Pinceladas são traços (clique = ponto) com espessura 2×raio.
+    """
+    lesao = _poligonos_mascara(p.lesoes_add, forma, f) if p.lesoes_add else np.zeros(forma, bool)
+    sadio = _poligonos_mascara(p.lesoes_rem, forma, f) if p.lesoes_rem else np.zeros(forma, bool)
+    for tipo, x1, y1, x2, y2, raio in p.pinceladas:
+        alvo = np.zeros(forma, np.uint8)
+        a, b = (round(x1 * f), round(y1 * f)), (round(x2 * f), round(y2 * f))
+        r = max(1, round(raio * f))
+        cv2.line(alvo, a, b, 1, 2 * r + 1, cv2.LINE_8)
+        cv2.circle(alvo, a, r, 1, -1)
+        cv2.circle(alvo, b, r, 1, -1)
+        if tipo == "lesao":
+            lesao |= alvo > 0
+        else:
+            sadio |= alvo > 0
+    return lesao, sadio
+
+
+def exemplos_treino(img_bgr: np.ndarray, params: ParamsFoto) -> tuple:
+    """(imagem processada, folha, lesão, sadio) para treinar o modelo com as anotações."""
+    img_p, f, p = preparar(img_bgr, params)
+    folha = analisar(img_bgr, replace(params, metodo_sintoma="cor")).mascara_folha > 0
+    lesao, sadio = mascaras_anotacao(p, folha.shape, f)
+    return img_p, folha, lesao & folha, sadio & folha
+
+
+def analisar(img_bgr: np.ndarray, params: ParamsFoto | None = None) -> ResultadoFoto:
+    p0 = params or ParamsFoto()
+    avisos: list[str] = []
+    img_bgr, f, p = preparar(img_bgr, p0)
     H, W = img_bgr.shape[:2]
 
     if p.poligonos:
@@ -531,8 +579,29 @@ def analisar(img_bgr: np.ndarray, params: ParamsFoto | None = None) -> Resultado
         sintoma = a_fino >= limiar
     # Correções do avaliador: manchas marcadas à mão entram como sintoma; áreas apagadas saem.
     # Só valem dentro das folhas (o recorte de folha não muda).
-    marcada = _poligonos_mascara(p.lesoes_add, (H, W), f) if p.lesoes_add else None
-    apagada = _poligonos_mascara(p.lesoes_rem, (H, W), f) if p.lesoes_rem else None
+    # Modelo de sintomas treinado com exemplos do avaliador (classificador.py).
+    prob_modelo = None
+    pacote = MODELOS.get(p.modelo_id) if p.modelo_id and p.metodo_sintoma != "cor" else None
+    if p.modelo_id and p.metodo_sintoma != "cor" and pacote is None:
+        avisos.append("Modelo de sintomas não carregado: usando só a regra de cor.")
+    if pacote is not None and regioes:
+        from . import classificador
+        folhas_uniao = np.zeros((H, W), bool)
+        for folha, _ in regioes:
+            folhas_uniao |= folha
+        prob = classificador.probabilidade(pacote, img_bgr, folhas_uniao)
+        prob_modelo = np.clip(prob * 255, 0, 255).astype(np.uint8)
+        pelo_modelo = prob >= p.limiar_modelo
+        sintoma = pelo_modelo if p.metodo_sintoma == "modelo" else (sintoma | pelo_modelo)
+
+    # Anotações valem sobre qualquer método: lesão marcada entra (até a borda da folha),
+    # área marcada como sadia sai.
+    marcada, apagada = (mascaras_anotacao(p, (H, W), f)
+                        if (p.lesoes_add or p.lesoes_rem or p.pinceladas) else (None, None))
+    if marcada is not None and not marcada.any():
+        marcada = None
+    if apagada is not None and not apagada.any():
+        apagada = None
 
     for i, (folha, nucleo) in enumerate(regioes, start=1):
         lesao = nucleo & sintoma
@@ -579,7 +648,7 @@ def analisar(img_bgr: np.ndarray, params: ParamsFoto | None = None) -> Resultado
         n_les, area_lesao / n_les if n_les else 0.0,
         _desenhar(img_bgr, folha_total, lesao_total, folhas),
         pb, _numerar(pb, lesoes[:p.max_numeros], f), lesoes,
-        folha_total, lesao_total, canal_a, modo_fundo, avisos,
+        folha_total, lesao_total, canal_a, modo_fundo, avisos, prob_modelo,
     )
 
 
